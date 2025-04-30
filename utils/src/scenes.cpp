@@ -1,5 +1,5 @@
 #include "scenes.h"
-
+#include "environment.h" 
 
 Environment* get_scene_env(int scene)
 {
@@ -12,13 +12,31 @@ Environment* get_scene_env(int scene)
 
     switch(scene) {
         case 1:
-            // 2D
-            start = {0, 1.2};
-            goal = {0, -1.0};
-            lows = {-4, -4.0};
-            highs = {4, 4};
-            env = new Environment2D("../resource/exist2.png", lows, highs, start, goal);
-            break;
+
+            //env = new Environment2D("../resource/exist2.png", lows, highs, start, goal);
+            //return new Environment2D("../resource/exist2.png", 
+                        // 2D
+            //            start = {0, 1.2},
+            //            goal = {0, -1.0},
+            //            lows = {-4, -4.0},
+            //            highs = {4, 4}
+            //);
+            //break;
+
+
+            {
+                pt start = {0, 1.2};
+                pt goal  = {0, -1.0};
+                pt lows  = {-4, -4};
+                pt highs = {4, 4};
+        
+                return new Environment2D("../resource/exist2.png", lows, highs, start, goal);
+            }
+            // ...
+            default:
+                return nullptr;
+            
+        
         case 2: {
             // zyzyzyz 7dof
             start = {-2.47, 2.5093, 0.5, -2.54409, -0.1, 1.72318, -0.30};
@@ -30,7 +48,7 @@ Environment* get_scene_env(int scene)
 
             env = new HighDofEnvironment(start, goal, joints, "7dofexistmedium", "../resource/7dof_exist_medium/libscene.so", lows, highs, delta);
             break;
-        }
+             }
         case 3: {
             // 6dof universal arm
             start = {-1.6, 1.13, 2.32, 2.08, 3.32, 0.68};
@@ -42,7 +60,7 @@ Environment* get_scene_env(int scene)
 
             env = new HighDofEnvironment(start, goal, joints, "6doftabletop", "../resource/6dof_tabletop/libscene.so", lows, highs, delta);
             break;
-        }
+            }
 
         case 4: {
             // 6dof, 3 2d robots
@@ -64,7 +82,7 @@ Environment* get_scene_env(int scene)
             delta = 0.1;
             env = new MultiRobotEnv(lows, highs, start, goal, squares, delta);
             break;
-        }
+             }
         case 5: {
             // 6 dof twistycool
             start = {0, 1.5, 0, 0, 0, 0};
@@ -75,7 +93,7 @@ Environment* get_scene_env(int scene)
 
             env = new HighDofEnvironment(start, goal, joints, "twistycool", "../resource/twistycool_own/libscene.so", lows, highs, delta);
             break;
-        }
+            }
     }
 
     return env;

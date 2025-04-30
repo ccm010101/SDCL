@@ -1,11 +1,167 @@
+/*********************************************************************
+ * Software License Agreement (BSD License)
+ *
+ *  Copyright (c) 2011, Rice University
+ *  All rights reserved.
+ *
+ *  Redistribution and use in source and binary forms, with or without
+ *  modification, are permitted provided that the following conditions
+ *  are met:
+ *
+ *   * Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above
+ *     copyright notice, this list of conditions and the following
+ *     disclaimer in the documentation and/or other materials provided
+ *     with the distribution.
+ *   * Neither the name of Rice University nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission.
+ *
+ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ *  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ *  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ *  POSSIBILITY OF SUCH DAMAGE.
+ *********************************************************************/
+
+/* Author: Ioan Sucan, James D. Marble, Ryan Luna, Henning Kayser */
+
 #include "SDCL.h"
-#include <boost/bind.hpp>
-#define BOOST_BIND_GLOBAL_PLACEHOLDERS
+
 #define foreach BOOST_FOREACH
 
 
+double objfunc(unsigned n, const double *x, double *grad, void *data)
+{
+    double *p = (double *) data;
+    double res = 0;
+    if (p && x){
+        for(int i = 0; i < n; i++){
+            res += pow(x[i] - p[i], 2);
+        }
+    }
+    if (grad) {
+        for(int i = 0; i < n; i++){
+            grad[i] = 2 * (x[i] - p[i]);
+        }
+    }
+    return res;
+}
 
-// ----objfunc, objfunc2, myconstraint, findClosetPoint removed ---
+double objfunc2(unsigned n, const double *x, double *grad, void *data)
+{
+    ModelData *d = (ModelData *) data;
+    double b = d->b;
+    int num_vectors = d->num_vectors;
+    double* coef = d->coef;
+    double* vectors = d->vectors;
+    double gamma = d->gamma;
+    double f = 0;
+    double dists_square[num_vectors];
+    for(int k = 0; k < num_vectors; k++){
+        dists_square[k] = 0;
+        for(int i = 0; i < n; i ++){
+            dists_square[k] += pow(x[i] - vectors[n*k+i], 2);
+        }
+        f += coef[k] * exp(-gamma * dists_square[k]);
+    }
+
+    if (grad) {
+        for(int i = 0; i < n; i++){
+            grad[i] = 0;
+            for(int k = 0; k < num_vectors; k++){
+                grad[i] += coef[k] * exp(-gamma * dists_square[k]) * (-gamma) * 2 * (x[i] - vectors[n*k+i]);
+            }
+        }
+        if (f-b < 0) {
+            for(int i = 0; i < n; i++) {
+                grad[i] = -grad[i];
+            }
+        }
+    }
+
+    if (f-b < 0) {
+        return b-f;
+    } else {
+        return f-b;
+    }
+}
+
+
+double myconstraint(unsigned n, const double *x, double *grad, void *data)
+{
+    ModelData *d = (ModelData *) data;
+    double b = d->b;
+    int num_vectors = d->num_vectors;
+    double* coef = d->coef;
+    double* vectors = d->vectors;
+    double gamma = d->gamma;
+    double f = 0;
+    double dists_square[num_vectors];
+    for(int k = 0; k < num_vectors; k++){
+        dists_square[k] = 0;
+        for(int i = 0; i < n; i ++){
+            dists_square[k] += pow(x[i] - vectors[n*k+i], 2);
+        }
+        f += coef[k] * exp(-gamma * dists_square[k]);
+    }
+    if (grad) {
+        for(int i = 0; i < n; i++){
+            grad[i] = 0;
+            for(int k = 0; k < num_vectors; k++){
+                grad[i] += coef[k] * exp(-gamma * dists_square[k]) * (-gamma) * 2 * (x[i] - vectors[n*k+i]);
+            }
+        }
+    }
+    return f-b;
+ }
+
+int findClosestPoint(double *p, double *startingP, double *res, int n, ModelData svm_data, std::vector<double> lower_bound, std::vector<double> upper_bound){
+    // ModelData svm_data = {b, num_vectors, gamma, coef, vectors};
+    
+    if (startingP && abs(myconstraint(n, p, NULL, &svm_data)) > abs(myconstraint(n, startingP, NULL, &svm_data))){
+        for(int i = 0; i < n; i++){
+            res[i] = startingP[i];
+        }
+    } else {
+        for(int i = 0; i < n; i++){
+            res[i] = p[i];
+        }
+    }
+
+    nlopt_opt opt;
+    opt = nlopt_create(NLOPT_LD_SLSQP, n);
+    nlopt_set_min_objective(opt, objfunc2, &svm_data);
+    double maxtime = 0.1;
+    nlopt_set_maxtime(opt, maxtime);
+
+    double lb[n] = {};
+    double ub[n] = {};
+
+    for (int i = 0; i < n; i++) 
+    {
+        lb[i] = lower_bound[i];
+        ub[i] = upper_bound[i];
+    }
+    nlopt_set_lower_bounds(opt, lb);
+    nlopt_set_upper_bounds(opt, ub);
+
+    // nlopt_add_equality_constraint(opt, myconstraint, &svm_data, 1e-6);
+    double minf;
+    nlopt_set_xtol_rel(opt, 1e-3);
+    int result = nlopt_optimize(opt, res, &minf);
+    nlopt_destroy(opt);
+    double nul[1];
+    return result;
+}
 
 
 namespace ompl
@@ -77,6 +233,10 @@ void SDCL::setup()
         connectionFilter_ = [](const Vertex &, const Vertex &) { return true; };
 
     // Setup optimization objective
+    //
+    // If no optimization objective was specified, then default to
+    // optimizing path length as computed by the distance() function
+    // in the state space.
     if (pdef_)
     {
         if (pdef_->hasOptimizationObjective())
@@ -123,7 +283,7 @@ void SDCL::setDefaultConnectionStrategy()
     if (starStrategy_)
         connectionStrategy_ = ompl::geometric::KStarStrategy<Vertex>([this] { return milestoneCount(); }, nn_, si_->getStateDimension());
     else
-        connectionStrategy_ = ompl::geometric::KStrategy<Vertex>(ompl::magic::DEFAULT_NEAREST_NEIGHBORS, nn_);
+        connectionStrategy_ = ompl::geometric::KStrategy<Vertex>(magic::DEFAULT_NEAREST_NEIGHBORS, nn_);
 }
 
 void SDCL::setProblemDefinition(const base::ProblemDefinitionPtr &pdef)
@@ -153,17 +313,17 @@ void SDCL::clear()
     iterations_ = 0;
     bestCost_ = base::Cost(std::numeric_limits<double>::quiet_NaN());
 
-    // // SVM model data cleanup
-    //if (!savedModelData_.vectors) 
-    //{
-    //    delete [] savedModelData_.vectors;
-    //    savedModelData_.vectors = NULL;
-    //}
-    //if (!savedModelData_.coef) 
-    //{
-    //    delete [] savedModelData_.coef;
-    //    savedModelData_.coef = nullptr;
-    //}
+    if (!savedModelData_.vectors) 
+    {
+        delete [] savedModelData_.vectors;
+        savedModelData_.vectors = NULL;
+    }
+
+    if (!savedModelData_.coef) 
+    {
+        delete [] savedModelData_.coef;
+        savedModelData_.coef = nullptr;
+    }
 
     collisionPoints_.reset(new pvec());
     stats_ = proof_stats();
@@ -176,9 +336,9 @@ void SDCL::freeMemory()
         si_->freeState(stateProperty_[v]);
     g_.clear();
 
-    // // SVM model data cleanup
-    //if (!savedModelData_.vectors) delete [] savedModelData_.vectors;
-    //if (!savedModelData_.coef) delete [] savedModelData_.coef;
+    if (!savedModelData_.vectors) delete [] savedModelData_.vectors;
+
+    if (!savedModelData_.coef) delete [] savedModelData_.coef;
 
     // saved2dPoints_.close();
 }
@@ -193,7 +353,7 @@ void SDCL::expandRoadmap(const base::PlannerTerminationCondition &ptc)
     if (!simpleSampler_)
         simpleSampler_ = si_->allocStateSampler();
 
-    std::vector<base::State *> states(ompl::magic::MAX_RANDOM_BOUNCE_STEPS);
+    std::vector<base::State *> states(magic::MAX_RANDOM_BOUNCE_STEPS);
     si_->allocStates(states);
     expandRoadmap(ptc, states);
     si_->freeStates(states);
@@ -206,7 +366,7 @@ void SDCL::expandRoadmap(const base::PlannerTerminationCondition &ptc,
     // as indicated in
     //  "Probabilistic Roadmaps for Path Planning in High-Dimensional Configuration Spaces"
     //        Lydia E. Kavraki, Petr Svestka, Jean-Claude Latombe, and Mark H. Overmars
-    
+
     PDF<Vertex> pdf;
 
     graphMutex_.lock();
@@ -241,7 +401,7 @@ void SDCL::expandRoadmap(const base::PlannerTerminationCondition &ptc,
                 successfulConnectionAttemptsProperty_[m] = 0;
                 disjointSets_.make_set(m);
 
-		// add the edge to the parent vertex
+                // add the edge to the parent vertex
                 const base::Cost weight = opt_->motionCost(stateProperty_[v], stateProperty_[m]);
                 const Graph::edge_property_type properties(weight);
                 boost::add_edge(v, m, properties, g_);
@@ -284,62 +444,38 @@ void SDCL::growRoadmap(const base::PlannerTerminationCondition &ptc)
     si_->freeState(workState);
 }
 
-//void SDCL::growRoadmap(const base::PlannerTerminationCondition &ptc, base::State *workState)
-//{
-//    while (!ptc)
-//    {
-//        iterations_++;
-        // search for a valid state
-//        bool found = false;
-        
-//        while (!found && !ptc)
-//        {
-//            unsigned int attempts = 0;
-//            do
-//           {
-//                found = sampleAndSaveCollisionPoints(workState, use_Gaussian_);
-//                attempts++;
-//            } while (attempts < ompl::magic::FIND_VALID_STATE_ATTEMPTS_WITHOUT_TERMINATION_CHECK && !found);
-//        }
-//       // add it as a milestone
-//       if (found)
-//            addMilestone(si_->cloneState(workState));
-//    }
-//}
 void SDCL::growRoadmap(const base::PlannerTerminationCondition &ptc, base::State *workState)
 {
-    // Keep generating valid states until time is up (ptc).
-    // Then add each valid state to the roadmap.
+    /* grow roadmap in the regular fashion -- sample valid states, add them to the roadmap, add valid connections */
     while (!ptc)
     {
         iterations_++;
 
-        // 1) Ask the valid-state sampler for a guaranteed collision-free state.
-        //    Because sampler_ is a ValidStateSampler, it returns 'true' only when
-        //    it successfully finds a valid state inside some internal #attempts.
-        bool gotValid = sampler_->sample(workState);
-
-        // 2) If we found a valid state (which we should, unless the sampler gave up),
-        //    then add it to the roadmap as a milestone:
-        if (gotValid)
-            addMilestone(si_->cloneState(workState));
-        else
+        // search for a valid state
+        bool found = false;
+        
+        while (!found && !ptc)
         {
-            // If for some reason sampler_ fails, we might just break or continue.
-            // For example:
-            OMPL_WARN("ValidStateSampler failed to find a valid sample. Stopping growth.");
-            break;
+            unsigned int attempts = 0;
+            do
+            {
+                found = sampleAndSaveCollisionPoints(workState, use_Gaussian_);
+                attempts++;
+            } while (attempts < magic::FIND_VALID_STATE_ATTEMPTS_WITHOUT_TERMINATION_CHECK && !found);
         }
+
+        // add it as a milestone
+        if (found)
+            addMilestone(si_->cloneState(workState));
     }
 }
-
-
 
 void SDCL::checkForSolution(const base::PlannerTerminationCondition &ptc, base::PathPtr &solution)
 {
     auto *goal = static_cast<base::GoalSampleableRegion *>(pdef_->getGoal().get());
     while (!ptc && !addedNewSolution_)
     {
+        // Check for any new goal states
         if (goal->maxSampleCount() > goalM_.size())
         {
             const base::State *st = pis_.nextGoal();
@@ -347,14 +483,16 @@ void SDCL::checkForSolution(const base::PlannerTerminationCondition &ptc, base::
                 goalM_.push_back(addMilestone(si_->cloneState(st)));
         }
 
+        // Check for a solution
         addedNewSolution_ = maybeConstructSolution(startM_, goalM_, solution);
+        // Sleep for 1ms
         if (!addedNewSolution_)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
 bool SDCL::maybeConstructSolution(const std::vector<Vertex> &starts, const std::vector<Vertex> &goals,
-                                  base::PathPtr &solution)
+                                                  base::PathPtr &solution)
 {
     base::Goal *g = pdef_->getGoal().get();
     base::Cost sol_cost(opt_->infiniteCost());
@@ -375,7 +513,7 @@ bool SDCL::maybeConstructSolution(const std::vector<Vertex> &starts, const std::
                     base::Cost pathCost = p->cost(opt_);
                     if (opt_->isCostBetterThan(pathCost, bestCost_))
                         bestCost_ = pathCost;
-
+                    // Check if optimization objective is satisfied
                     if (opt_->isSatisfied(pathCost))
                     {
                         solution = p;
@@ -447,33 +585,29 @@ ompl::base::PlannerStatus SDCL::solve(const base::PlannerTerminationCondition &p
     // Reset addedNewSolution_ member and create solution checking thread
     addedNewSolution_ = false;
     base::PathPtr sol;
-    //std::thread slnThread([this, &ptc, &sol] { checkForSolution(ptc, sol); });
-    
+    std::thread slnThread([this, &ptc, &sol] { checkForSolution(ptc, sol); });
+
     // construct new planner termination condition that fires when the given ptc is true, or a solution is found
     base::PlannerTerminationCondition ptcOrSolutionFound([this, &ptc] { return ptc || addedNewSolution(); });
 
-    // create SDCL thread to generate "useful" samples
-    //std::thread infThread([this, &ptcOrSolutionFound]
-    //{
-        // generateSamples(ptcOrSolutionFound);
-    //});
+    // create SDCL thread to generate useful samples
+    std::thread infThread([this, &ptcOrSolutionFound] {generateSamples(ptcOrSolutionFound); });
 
     constructRoadmap(ptcOrSolutionFound);
 
     // Ensure slnThread and SDCLThread is ceased before exiting solve
-    //slnThread.join();
-    //infThread.join();
-    checkForSolution(ptc, sol);
-    constructRoadmap(ptcOrSolutionFound);
+    slnThread.join();
+    infThread.join();
+
     OMPL_INFORM("%s: Created %u states", getName().c_str(), boost::num_vertices(g_) - nrStartStates);
 
-    // // SVM stats (commented out)
     OMPL_INFORM("Total training time is %f, total sampling time is %f.", stats_.training_time, stats_.sampling_time);
 
     if (sol)
     {
         base::PlannerSolution psol(sol);
         psol.setPlannerName(getName());
+        // if the solution was optimized, we mark it as such
         psol.setOptimized(opt_, bestCost_, addedNewSolution());
         pdef_->addSolutionPath(psol);
 
@@ -494,14 +628,15 @@ ompl::base::PlannerStatus SDCL::solve(const base::PlannerTerminationCondition &p
         std::chrono::duration<double> tot = std::chrono::steady_clock::now() - start_time;
         stats_.total_time += tot.count();
 
-        //printStat();
+        printStat();
+
         return base::PlannerStatus::APPROXIMATE_SOLUTION;
     }
 
     std::chrono::duration<double> tot = std::chrono::steady_clock::now() - start_time;
     stats_.total_time += tot.count();
 
-    //printStat();
+    printStat();
 
     return sol ? base::PlannerStatus::EXACT_SOLUTION : base::PlannerStatus::TIMEOUT;
 }
@@ -515,7 +650,7 @@ void SDCL::constructRoadmap(const base::PlannerTerminationCondition &ptc)
     if (!simpleSampler_)
         simpleSampler_ = si_->allocStateSampler();
 
-    std::vector<base::State *> xstates(ompl::magic::MAX_RANDOM_BOUNCE_STEPS);
+    std::vector<base::State *> xstates(magic::MAX_RANDOM_BOUNCE_STEPS);
     si_->allocStates(xstates);
     bool grow = true;
 
@@ -526,11 +661,11 @@ void SDCL::constructRoadmap(const base::PlannerTerminationCondition &ptc)
         // call growRoadmap() twice as long for every call of expandRoadmap()
         if (grow)
             growRoadmap(base::plannerOrTerminationCondition(
-                            ptc, base::timedPlannerTerminationCondition(2.0 * ompl::magic::ROADMAP_BUILD_TIME)),
+                            ptc, base::timedPlannerTerminationCondition(2.0 * magic::ROADMAP_BUILD_TIME)),
                         xstates[0]);
         else
             expandRoadmap(base::plannerOrTerminationCondition(
-                              ptc, base::timedPlannerTerminationCondition(ompl::magic::ROADMAP_BUILD_TIME)),
+                              ptc, base::timedPlannerTerminationCondition(magic::ROADMAP_BUILD_TIME)),
                           xstates);
         grow = !grow;
     }
@@ -541,7 +676,7 @@ void SDCL::constructRoadmap(const base::PlannerTerminationCondition &ptc)
 
 SDCL::Vertex SDCL::addMilestone(base::State *state)
 {
-    //std::lock_guard<std::mutex> _(graphMutex_); deadlock with expandRoadmap()
+    std::lock_guard<std::mutex> _(graphMutex_);
 
     Vertex m = boost::add_vertex(g_);
     stateProperty_[m] = state;
@@ -571,6 +706,7 @@ SDCL::Vertex SDCL::addMilestone(base::State *state)
         }
 
     nn_->add(m);
+
     return m;
 }
 
@@ -585,8 +721,8 @@ bool SDCL::sameComponent(Vertex m1, Vertex m2)
 }
 
 ompl::base::Cost SDCL::constructApproximateSolution(const std::vector<Vertex> &starts,
-                                                    const std::vector<Vertex> &goals,
-                                                    base::PathPtr &solution)
+                                                                    const std::vector<Vertex> &goals,
+                                                                    base::PathPtr &solution)
 {
     std::lock_guard<std::mutex> _(graphMutex_);
     base::Goal *g = pdef_->getGoal().get();
@@ -614,6 +750,7 @@ ompl::base::Cost SDCL::constructApproximateSolution(const std::vector<Vertex> &s
 
             try
             {
+                // Consider using a persistent distance_map if it's slow
                 boost::astar_search(
                     g_, start, [this, goal](Vertex v) { return costHeuristic(v, goal); },
                     boost::predecessor_map(prev)
@@ -633,6 +770,9 @@ ompl::base::Cost SDCL::constructApproximateSolution(const std::vector<Vertex> &s
             Vertex closeToGoal = start;
             for (auto vp = vertices(g_); vp.first != vp.second; vp.first++)
             {
+                // We want to get the distance of each vertex to the goal.
+                // Boost lets us get cost-to-come, cost-to-come+dist-to-goal,
+                // but not just dist-to-goal.
                 ompl::base::Cost dist_to_goal(costHeuristic(*vp.first, goal));
                 if (opt_->isFinite(rank[*vp.first]) && opt_->isCostBetterThan(dist_to_goal, closestVal))
                 {
@@ -696,7 +836,7 @@ ompl::base::PathPtr SDCL::constructSolution(const Vertex &start, const Vertex &g
 void SDCL::getPlannerData(base::PlannerData &data) const
 {
     Planner::getPlannerData(data);
-    
+
     // Explicitly add start and goal states:
     for (unsigned long i : startM_)
         data.addStartVertex(
@@ -705,16 +845,17 @@ void SDCL::getPlannerData(base::PlannerData &data) const
     for (unsigned long i : goalM_)
         data.addGoalVertex(
             base::PlannerDataVertex(stateProperty_[i], const_cast<SDCL *>(this)->disjointSets_.find_set(i)));
-   
+
     // Adding edges and all other vertices simultaneously
     foreach (const Edge e, boost::edges(g_))
     {
         const Vertex v1 = boost::source(e, g_);
         const Vertex v2 = boost::target(e, g_);
         data.addEdge(base::PlannerDataVertex(stateProperty_[v1]), base::PlannerDataVertex(stateProperty_[v2]));
+
         // Add the reverse edge, since we're constructing an undirected roadmap
         data.addEdge(base::PlannerDataVertex(stateProperty_[v2]), base::PlannerDataVertex(stateProperty_[v1]));
-        
+
         // Add tags for the newly added vertices
         data.tagState(stateProperty_[v1], const_cast<SDCL *>(this)->disjointSets_.find_set(v1));
         data.tagState(stateProperty_[v2], const_cast<SDCL *>(this)->disjointSets_.find_set(v2));
@@ -727,360 +868,440 @@ ompl::base::Cost SDCL::costHeuristic(Vertex u, Vertex v) const
 }
 
 
-// -----------SDCL part removed---------------------------------------
-// ----------GMM Part------------------------
-#include <iostream>
-#include <armadillo>
-#include "SDCL.h"
 
-arma::gmm_diag SDCL::buildSingleCovDiagGMM(const arma::mat& dataset, int k)
+
+// -------------------------------------------------- SDCL part -------------------------------------------------------
+
+void SDCL::generateSamples(const base::PlannerTerminationCondition &ptc)
 {
-    using namespace arma;
+    // SDCL main iteration
+    int itr = 1;
 
-    size_t d = dataset.n_rows;
-    size_t N = dataset.n_cols;
+    trainingSetup();
 
-    // 1) K-means to get cluster centroids
-    mat centroids(d, k);
-    bool kmSuccess = kmeans(centroids, dataset, k, static_spread, 10, false);
-    if(!kmSuccess)
+    while (!ptc())
     {
-        OMPL_WARN("K-means failed for k=%d", k);
-        return gmm_diag(); // empty
+        OMPL_INFORM("------------------------SDCL Main Iteration %d -------------------------", itr);
+
+        // make training data from graph
+        graphMutex_.lock();
+        int cur_training_size = boost::num_vertices(g_);
+        graphMutex_.unlock();
+
+        makeTrainingDataFromGraph(cur_training_size);
+
+        if (n_goal_points_ == 0 || n_start_points_ == 0) continue;
+
+        trainManifold();
+
+        if (ptc()) break;
+
+        sampleManifoldPoints(ptc);
+
+        itr++;
+    }
+    stats_.n_itr = itr;
+}
+
+void SDCL::makeDatesetAfterAddingFreeManifoldPoints()
+{
+    // make input data set from new training data. 
+    int training_size = X_->size();
+    
+    float* classes = new float[training_size];
+    int features = si_->getStateDimension();
+    float* data = new float[training_size * features];
+
+    int n_goal_points = 0;
+    int n_start_points = 0;
+    
+    for(int i; i < training_size; i++)
+    {
+        for (int j = 0; j < features; j++)
+        {
+            data[features * i + j] = (*X_)[i][j];
+        }
+
+        classes[i] = (*Y_)[i];
+        if ((*Y_)[i] == 1) n_start_points++;
+        else n_goal_points++;
     }
 
-    // 2) Assign each point, gather membership
-    rowvec assignments(N, fill::zeros);
-    vec clusterCounts(k, fill::zeros);
+    dataset_.load_from_dense(training_size, features, data, classes);
 
-    for(size_t i=0; i < N; i++)
-    {
-        double bestDist = DBL_MAX;
-        uword bestC = 0;
-        for(int c=0; c < k; c++)
+    OMPL_INFORM("Total number of training points is %d, number of goal points is %d, number of start points is %d", training_size, n_goal_points, n_start_points);
+
+    delete [] data;
+    delete [] classes;
+
+}
+
+void SDCL::sampleManifoldPoints(const base::PlannerTerminationCondition &ptc)
+{
+    auto start = std::chrono::steady_clock::now();
+
+    addedToTraining_ = 0;
+
+    // start thread pool
+    int num_threads = std::thread::hardware_concurrency() - 4;
+
+    if (!collisionPoints_) collisionPoints_.reset(new pvec()); // avoid segfault when no collision points are added. 
+
+    // need a copy of the collision points for read and write conflicts.
+    pvec collision_copy;
+    collisionPointsMutex_.lock();
+    int last_num_collision_points = collisionPoints_->size();
+    copy(collisionPoints_->begin(), collisionPoints_->end(), back_inserter(collision_copy));
+    collisionPointsMutex_.unlock();
+
+    int num_training_points = X_->size();
+    
+    OMPL_INFORM("Thread pool for calculating manifold points has %d threads.", num_threads);
+    boost::asio::thread_pool threadpool(num_threads);
+    
+    // loop to add thread pool
+    for (int i = 0; i < last_num_collision_points; i++) {
+        if (ptc()) break;
+        boost::asio::post(threadpool, boost::bind(&SDCL::calManifoldPoints, this, collision_copy[i]));
+    }
+    // also use training points to sample manifold points. 
+    if (use_training_) {
+        for (int i = 0; i < num_training_points; i++) {
+            if (ptc()) break;
+            boost::asio::post(threadpool, boost::bind(&SDCL::calManifoldPoints, this, (*X_)[i]));
+        }
+    }
+
+    threadpool.join();
+
+    OMPL_INFORM("There are %d collision points, %d training points, generated %d free manifold points. ", 
+               last_num_collision_points, num_training_points, addedToTraining_);
+
+    stats_.n_valid_mpoints += addedToTraining_;
+    stats_.n_collision_points = last_num_collision_points;
+
+    OMPL_INFORM("A total of %d free manifold points used. ", stats_.n_valid_mpoints);
+
+    std::chrono::duration<double> diff_sampling = std::chrono::steady_clock::now() - start;
+    stats_.sampling_time += diff_sampling.count();
+}
+
+void SDCL::calManifoldPoints(pt intput_point){
+    const unsigned int dim = si_->getStateDimension();
+    double res_data[dim] = {};
+    double cpoint[dim] = {};
+    double mpoint[dim] = {};
+    for (int ii = 0; ii < dim; ii++) {
+        cpoint[ii] = intput_point[ii];
+        mpoint[ii] = intput_point[ii];
+    }
+
+    // opt to find closest point on manifold
+    int success = findClosestPoint(cpoint, mpoint, res_data, dim, savedModelData_, lower_bound_, upper_bound_);
+
+    double svm_value = evaluate(res_data);
+    base::State *res_state = si_->allocState();
+    auto *rstate = static_cast<base::RealVectorStateSpace::StateType *>(res_state);
+
+    if (success > 0 && abs(svm_value) < 0.001) {
+        pt res_point(dim, 0); 
+        for (int ii = 0; ii < dim; ii++) {
+            res_point[ii] = res_data[ii];
+            rstate->values[ii] = res_data[ii];
+        }
+
+        if (si_->isValid(rstate)) {
+            addToTraining(si_->cloneState(res_state), res_point); // pay attention to whether the state needs to be copied. 
+        }
+    } 
+
+    si_->freeState(res_state);
+}
+
+void SDCL::addToTraining(base::State* state, pt point) 
+{
+    // this is the addmilestone part.
+    std::lock_guard<std::mutex> _(graphMutex_);
+
+    Vertex m = boost::add_vertex(g_);
+    stateProperty_[m] = state;
+    totalConnectionAttemptsProperty_[m] = 1;
+    successfulConnectionAttemptsProperty_[m] = 0;
+
+    // Initialize to its own (dis)connected component.
+    disjointSets_.make_set(m);
+
+    // Which milestones will we attempt to connect to? 
+    const std::vector<Vertex> &neighbors = connectionStrategy_(m);
+
+    foreach (Vertex n, neighbors)
+        if (connectionFilter_(n, m))
         {
-            double dsq = accu(square(dataset.col(i) - centroids.col(c)));
-            if(dsq < bestDist)
+            totalConnectionAttemptsProperty_[m]++;
+            totalConnectionAttemptsProperty_[n]++;
+            if (si_->checkMotion(stateProperty_[n], stateProperty_[m]))
             {
-                bestDist = dsq;
-                bestC = c;
+                successfulConnectionAttemptsProperty_[m]++;
+                successfulConnectionAttemptsProperty_[n]++;
+                const base::Cost weight = opt_->motionCost(stateProperty_[n], stateProperty_[m]);
+                const Graph::edge_property_type properties(weight);
+                boost::add_edge(n, m, properties, g_);
+                uniteComponents(n, m);
             }
         }
-        assignments[i] = bestC;
-        clusterCounts[bestC]++;
-    }
 
-    // 3) Refine means
-    centroids.zeros();
-    for(size_t i=0; i < N; i++)
-    {
-        uword c = (uword) assignments[i];
-        centroids.col(c) += dataset.col(i);
-    }
-    for(int c=0; c < k; c++)
-    {
-        if(clusterCounts[c] > 0)
-            centroids.col(c) /= clusterCounts[c];
-    }
+    nn_->add(m);
 
-    // 4) Weights
-    vec weights = clusterCounts / double(N);
-
-    // 5) single diag => compute overall variance from entire dataset
-    vec globalMean = mean(dataset, 1);
-    vec globalVar(d, fill::zeros);
-
-    for(size_t i=0; i < N; i++)
-    {
-        vec diff = dataset.col(i) - globalMean;
-        globalVar += diff % diff;
-    }
-    globalVar /= double(N);
-    // clamp or fix tiny variance
-    globalVar.for_each( [](double &val) { if(val<1e-12) val=1e-12; } );
-
-    // Construct the gmm_diag
-    //gmm_diag model;
-    //model.means.set_size(d, k);
-    //model.dcovs.set_size(d, k);
-    //model.hefts.set_size(k);
-    // Prepare local structures for means, dcovs, hefts
-    //  Then use model.set_params(...) to avoid direct writes to const fields
-
-    arma::mat outMeans(d, k, fill::zeros);
-    arma::mat outDcovs(d, k, fill::zeros);
-    arma::rowvec outHefts(k, fill::zeros);
-
-    for(int c=0; c < k; c++)
-    {
-        //model.means.col(c) = centroids.col(c);
-        //model.hefts[c]     = weights[c];
-        //model.dcovs.col(c) = globalVar;  // same diagonal for all
-        outMeans.col(c) = centroids.col(c); // each column is the mean
-        outHefts(c)     = weights[c];       // store mixture weight
-        outDcovs.col(c) = globalVar;        // single diagonal for all
-    
-    }
-
-    // ensure sum of weights = 1
-    double sumW = accu(outHefts);
-    //if(sumW > 0) model.hefts /= sumW;
-
-
-    if (sumW > 0)
-    outHefts = outHefts * (1.0 / sumW);
-
-    // 7) Build the gmm_diag via set_params
-    arma::gmm_diag model;
-    // bool set_params(...)
-    //   set_params( means, dcovs, heaps, normalise_hefts, check_empty )
-    model.set_params(outMeans, outDcovs, outHefts);
-                                    
-    //if(!success)
-    //{
-    //    OMPL_WARN("set_params() failed for single-cov GMM k=%d", k);
-    //    return gmm_diag(); // empty
-    //}
-
-    return model;  // 'model' now has your single diag
+    addedToTraining_++;
 }
 
+void SDCL::save2dPoints(pt point, std::ostream& output) {
+    for (int ii = 0; ii < point.size(); ii++) {
+        output << point[ii] << " ";
+    }
+    output << std::endl;
+}
 
-
-void SDCL::trainGMMArmadilloBIC(const std::vector<std::vector<double>> &data,
-                                int minK, int maxK)
+void SDCL::trainManifold()
 {
-    if (data.empty() || minK <= 0 || maxK < minK)
-    {
-        OMPL_INFORM("No data or invalid range for single diag GMM BIC training.");
-        return;
-    }
-    size_t dim = data[0].size();
-    size_t N   = data.size();
-    arma::mat dataset(dim, N);
-    for (size_t i = 0; i < N; ++i)
-    {
-        for (size_t d = 0; d < dim; d++)
-            dataset(d, i) = data[i][d];
-    }
+    // train the manifold using graph points
+    auto start = std::chrono::steady_clock::now();
 
-    double bestBIC = std::numeric_limits<double>::infinity();
-    arma::gmm_diag bestModel;
+    // train svm
+    model_->train(dataset_, param_);
 
-    for(int k = minK; k <= maxK; k++)
+    saveModelData();
+
+    std::chrono::duration<double> diff_training = std::chrono::steady_clock::now() - start;
+    stats_.training_time += diff_training.count();
+}
+
+void SDCL::trainingSetup()
+{
+    model_.reset(new SVC());
+    param_.kernel_type = SvmParam::RBF;
+    param_.degree = 3;
+    param_.gamma = 1.0;
+    param_.coef0 = 0;
+    param_.nu = 0.5;
+    param_.C = 100;
+    param_.epsilon = 1e-3;
+    param_.p = 0.1;
+    param_.probability = 0;
+    param_.nr_weight = 0;
+    param_.weight_label = NULL;
+    param_.weight = NULL;
+
+    // thunderSVM logging config. 
+    el::Loggers::addFlag(el::LoggingFlag::HierarchicalLogging);
+    el::Loggers::setLoggingLevel(el::Level::Unknown);
+
+    stats_.useGaussian = use_Gaussian_;
+    stats_.useTraining = use_training_;
+}
+
+void SDCL::makeTrainingDataFromGraph(unsigned long int training_size) 
+{
+    // make input data set from graph disjoint set. 
+    std::lock_guard<std::mutex> _(graphMutex_);
+
+    // training_size += 1;
+    int data_size = training_size;
+
+    float* classes = new float[data_size];
+    int features = si_->getStateDimension();
+    float* data = new float[data_size * features];
+    int cur_index = 0;
+    
+    X_.reset(new pvec(data_size, pt(features, 0.0)));
+    Y_.reset(new label(data_size, 0));
+    n_goal_points_ = 0;
+    n_start_points_ = 0;
+
+    bool inGoal = false;
+    
+    foreach (Vertex v, boost::vertices(g_))
     {
-        arma::gmm_diag model = buildSingleCovDiagGMM(dataset, k);
-        if(model.means.n_cols == 0)
+        Vertex cur_set = disjointSets_.find_set(v);
+        base::State* s = stateProperty_[v];
+
+        for (int j = 0; j < features; j++)
         {
-            // means it failed or is empty
-            continue;
+            data[features * cur_index + j] = (float)s->as<base::RealVectorStateSpace::StateType>()->values[j];
+            (*X_)[cur_index][j] = (double)s->as<base::RealVectorStateSpace::StateType>()->values[j];
         }
 
-        // compute log-likelihood
-        // Use log_p(...) for the entire dataset
-        arma::rowvec logpVec = model.log_p(dataset); // rowvec of length N
-        double ll = arma::accu(logpVec);
-        // single diag => p = (k - 1) + k*dim + dim
-        double p = (k - 1) + double(k*dim) + double(dim);
+        inGoal = false;
 
-        double bic = -2.0 * ll + p * std::log((double)N);
-
-        OMPL_INFORM("k=%d => logLik=%.2f, BIC=%.2f", k, ll, bic);
-
-        if(bic < bestBIC)
-        {
-            bestBIC  = bic;
-            bestModel= model;
+        foreach (Vertex goal, goalM_)
+        {   
+            Vertex goal_representation = disjointSets_.find_set(goal);
+            if (cur_set == goal_representation)
+            {
+                inGoal = true;
+                break;
+            }
         }
 
+        if (inGoal) 
+        {
+            classes[cur_index] = -1;
+            (*Y_)[cur_index] = -1;
+            n_goal_points_++;
+        } else
+        {
+            classes[cur_index] = 1;
+            (*Y_)[cur_index] = 1;
+            n_start_points_++;
+        }
+
+        cur_index++;
+
+        if (cur_index == training_size) break;
     }
-
-    OMPL_INFORM("Single diag => best BIC=%.2f", bestBIC);
-
-    // store it for later
-    armadilloDiagGMM_ = bestModel;
-}
-
-
-std::vector<std::vector<double>> SDCL::collectRoadmapStates() const
-{
-    std::vector<std::vector<double>> data;
-    //std::lock_guard<std::mutex> lock(graphMutex_);  // deadlock
-
-    for (auto v : boost::make_iterator_range(boost::vertices(g_)))
-    {
-        const base::State* st = stateProperty_[v];
-        auto *rv = st->as<base::RealVectorStateSpace::StateType>();
-        unsigned int dim = si_->getStateDimension();
-
-        std::vector<double> sample(dim);
-        for (unsigned int d = 0; d < dim; ++d)
-            sample[d] = rv->values[d];
-
-        data.push_back(std::move(sample));
-    }
-    return data;
-}
-// 2D Scatter plot
-#ifdef USE_SCIPLOT
-#include <sciplot/sciplot.hpp>
-//#endif
-
-//#include "SDCL.h"
-void SDCL::plotRoadmapScatter(const std::string &filename) //const
-{
-//#ifdef USE_SCIPLOT
-
-    // If we have sciplot, do the real plotting:
-    std::lock_guard<std::mutex> lock(graphMutex_);
-
-    // We'll gather data grouped by connected component
-    std::unordered_map<unsigned long, std::vector<double>> X, Y;
-    for (auto v : boost::make_iterator_range(boost::vertices(g_)))
-    {
-        // representative of this vertex's component
-        Vertex comp = disjointSets_.find_set(v);
-        unsigned long compID = static_cast<unsigned long>(comp);
-
-        // 2D example
-        const base::State *st = stateProperty_[v];
-        auto *rv = st->as<base::RealVectorStateSpace::StateType>();
-        double theta1 = rv->values[0];
-        double theta2 = rv->values[1];
-
-        X[compID].push_back(theta1);
-        Y[compID].push_back(theta2);
-    }
-
-    using namespace sciplot; 
-    Plot2D plot;
-    plot.legend().atTopRight().displayHorizontal().displayExpandWidthBy(2).fontSize(7);
-    // gather *all* points from all components in one big set of arrays
-    std::vector<double> xsAll, ysAll;
-    xsAll.reserve( X.size() * 100 ); // optional rough reserve
-    ysAll.reserve( X.size() * 100 ); // just a guess to reduce re-allocations
-
-    for (const auto &entry : X)
-    {
-        unsigned long compID = entry.first;
-        const auto &compXs  = entry.second;     // the X-values for this component
-        const auto &compYs  = Y.at(compID);     // the Y-values for the same component
-
-        xsAll.insert(xsAll.end(), compXs.begin(), compXs.end());
-        ysAll.insert(ysAll.end(), compYs.begin(), compYs.end());
-    }
-
-    // Plot all of them at once (optional label like "All points")
-    plot.drawPoints(xsAll, ysAll).pointSize(1.0).label("All components");
     
-    // Each component separately, then loop again and do a different label / color for each comp.
-    for (auto &kv : X)
-    {
-        unsigned long compID = kv.first;
-        std::vector<double> &xs = kv.second;
-        std::vector<double> &ys = Y[compID];
+    dataset_.load_from_dense(training_size, features, data, classes);
 
-        std::string label = "component " + std::to_string(compID);
-        plot.drawPoints(xs, ys).pointSize(1.0).label(label);
-    }
+    OMPL_INFORM("Number of goal points is %d, number of start points is %d", n_goal_points_, n_start_points_);
 
-    Figure fig = {{ plot }};
-    Canvas canvas = {{ fig }};
-    canvas.title("Roadmap scatter with components");
-    canvas.save(filename);
-    std::cout << "Saved scatter plot to " << filename << "\n";
-
-#else
-    // If sciplot is not available, just do a stub
-    std::cout << "Plotting to file: " << filename 
-              << " (stub function). No sciplot available.\n";
-#endif
+    delete [] data;
+    delete [] classes;
 }
 
 
-void SDCL::plotGMMClusters(const std::string &filename)
+void SDCL::saveCollisionPoints(base::State *workState) 
 {
-#ifdef USE_SCIPLOT
-    using namespace arma;
-    using namespace sciplot;
+    if (!collisionPoints_) collisionPoints_.reset(new pvec());
 
-    std::lock_guard<std::mutex> lock(graphMutex_);
+    const unsigned int dim = si_->getStateDimension();
+    pt point(dim);
+    for (int i = 0; i < dim; i++) {
+        point[i] = (double)workState->as<base::RealVectorStateSpace::StateType>()->values[i];
+    }
+    collisionPointsMutex_.lock();
+    collisionPoints_->push_back(point);
+    collisionPointsMutex_.unlock();
+}
 
-    // 1) Collect states into a std::vector<std::vector<double>>.
-    auto dataVec = collectRoadmapStates();
-    if (dataVec.empty())
-    {
-        std::cout << "No roadmap data to plot.\n";
-        return;
+
+double SDCL::evaluate(double* point) {
+    if (savedModelData_.num_vectors == 0) saveModelData();
+
+    double f = 0;
+    double dists_square[savedModelData_.num_vectors];
+    int features = si_->getStateDimension();
+
+    for(int k = 0; k < savedModelData_.num_vectors; k++){
+        dists_square[k] = 0;
+        for(int i = 0; i < features; i++){
+            dists_square[k] += pow(point[i] - savedModelData_.vectors[features*k+i], 2);
+        }
+        f += savedModelData_.coef[k] * exp(-savedModelData_.gamma * dists_square[k]);
     }
 
-    // only handle 2D for plotting:
-    size_t dim = dataVec[0].size();
-    if (dim != 2)
+    return f-savedModelData_.b; 
+}
+
+bool SDCL::testTraining() {
+    std::vector<double> predict_y = model_->predict(dataset_.instances(), -1);
+    std::shared_ptr<Metric> metric;
+    metric.reset(new Accuracy());
+    double acc = metric->score(predict_y, dataset_.y());
+
+    LOG(INFO) << metric->name() << " = " << acc;
+    if (acc != 1.0) return false;
+    else return true;
+}
+
+void SDCL::saveModelData() {
+    if (!savedModelData_.vectors) delete [] savedModelData_.vectors;
+
+    if (!savedModelData_.coef) delete [] savedModelData_.coef;
+
+    const float_type* rho_data = (model_->get_rho()).host_data();
+    DataSet::node2d vectors = model_->svs();
+    const float_type *coef_data = (model_->get_coef()).host_data();
+    int features = si_->getStateDimension();
+
+    savedModelData_ = ModelData();
+    savedModelData_.b = rho_data[0];
+    savedModelData_.num_vectors = model_->total_sv();
+    savedModelData_.gamma = param_.gamma;
+    savedModelData_.coef = new double[savedModelData_.num_vectors];
+    savedModelData_.vectors = new double[savedModelData_.num_vectors * features];
+    for (int i = 0; i < savedModelData_.num_vectors; i++) {
+        for (int j = 0; j < features; j++) {
+            savedModelData_.vectors[i * features + j] = vectors[i][j].value;
+        }
+        savedModelData_.coef[i] = coef_data[i];
+    }
+}
+
+void SDCL::printStat() {
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%d-%m-%Y-%H-%M-%S");
+    auto str = oss.str();
+    std::ofstream csv_file("stat_output" + str + "_training.csv");
+    csv_file << "Solved, Total planning time, itr, training time, sampling time, free mani-points, collision points, training points, use Gaussian, use Training" << std::endl;
+    csv_file << stats_.solved 
+             << ", " << stats_.total_time
+             << ", " << stats_.n_itr
+             << ", " <<  stats_.training_time 
+             << ", " << stats_.sampling_time 
+             << ", " << stats_.n_valid_mpoints 
+             << ", " <<  stats_.n_collision_points
+             << ", " << (int)X_->size()
+             << ", " << stats_.useGaussian
+             << ", " << stats_.useTraining << std::endl;
+    csv_file.close();
+}
+
+bool SDCL::sampleAndSaveCollisionPoints(base::State* workState, bool use_Gaussian)
+{
+    bool found = false;
+    // Gaussian sampling
+    if (use_Gaussian)
     {
-        std::cout << "plotGMMClusters() only supports 2D data.\n";
-        return;
+        unsigned int tries = 0;
+        base::State *temp = si_->allocState();
+        do
+        {
+            simpleSampler_->sampleUniform(workState);
+            bool v1 = si_->isValid(workState);
+            simpleSampler_->sampleGaussian(temp, workState, stddev_);
+            bool v2 = si_->isValid(temp);
+            if (v1 != v2)
+            {
+                if (v2)
+                {
+                    saveCollisionPoints(workState);
+                    si_->copyState(workState, temp);
+                } else 
+                {
+                    saveCollisionPoints(temp);
+                }
+
+                found = true;
+            }
+            ++tries;
+        } while (!found && tries < magic::MAX_VALID_SAMPLE_ATTEMPTS);
+        si_->freeState(temp);
+    } 
+    else  // Uniform Sampling
+    {
+        unsigned int tries = 0;
+        do
+        {
+            simpleSampler_->sampleUniform(workState);
+            found = si_->isValid(workState);
+            // save collision points
+            if (!found) saveCollisionPoints(workState);
+            ++tries;
+        } while (!found && tries < magic::MAX_VALID_SAMPLE_ATTEMPTS);
     }
 
-    // 2) Convert to arma::mat
-    size_t N = dataVec.size();
-    arma::mat dataset(dim, N);
-    for (size_t i = 0; i < N; ++i)
-    {
-        for (size_t d = 0; d < dim; d++)
-            dataset(d, i) = dataVec[i][d];
-    }
-
-    // Ensure GMM is valid (trained).
-    if (armadilloDiagGMM_.means.n_cols == 0)
-    {
-        std::cout << "GMM is empty (not trained?). Cannot plot clusters.\n";
-        return;
-    }
-
-    // 3) Assign each sample to its cluster.
-    //    Must specify the distance mode, e.g. eucl_dist.
-    arma::urowvec assignments = armadilloDiagGMM_.assign(dataset, arma::eucl_dist);
-
-    // 4) Group points by cluster ID.
-    std::unordered_map<unsigned int, std::vector<double>> X, Y;
-    for (size_t i = 0; i < N; i++)
-    {
-        unsigned int cid = assignments[i];
-        double xVal = dataset(0, i);
-        double yVal = dataset(1, i);
-
-        X[cid].push_back(xVal);
-        Y[cid].push_back(yVal);
-    }
-
-    // 5) Make a sciplot::Plot2D, set labels separately.
-    Plot2D plot;
-    plot.legend().atTopRight().displayHorizontal().displayExpandWidthBy(2).fontSize(8);
-
-    plot.xlabel("X");
-    plot.ylabel("Y");
-
-    // Plot each cluster with a distinct label.
-    for (auto &kv : X)
-    {
-        unsigned int cID = kv.first;
-        const auto &xs = kv.second;
-        const auto &ys = Y[cID];
-
-        std::string label = "Cluster " + std::to_string(cID);
-        plot.drawPoints(xs, ys).pointSize(1.5).label(label);
-    }
-
-    // 6) Wrap into a figure, save to disk.
-    Figure fig = {{ plot }};
-    Canvas canvas = {{ fig }};
-    canvas.title("GMM Clusters (2D)");
-    canvas.save(filename);
-
-    std::cout << "Saved GMM cluster-assignments plot to " << filename << "\n";
-#else
-    // If sciplot not available:
-    std::cout << "No sciplot available; plotGMMClusters() is a stub.\n";
-#endif
+    return found;
 }

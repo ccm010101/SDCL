@@ -102,10 +102,6 @@ target_link_libraries(SDCL PRIVATE ${LZ4_LIBRARIES})
 target_include_directories(SDCL PRIVATE "/usr/local/include")
 target_include_directories(SDCL PRIVATE "${OMPL_INCLUDE_DIRS}")
 target_include_directories(SDCL PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/SDCL")
-target_include_directories(env PRIVATE 
-    # path to the directory containing environment.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/utils
-)
 
 # For threading
 set(CMAKE_THREAD_LIBS_INIT "-lpthread")
