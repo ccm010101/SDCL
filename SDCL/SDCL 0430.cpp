@@ -839,203 +839,264 @@ void SDCL::buildPerComponentGMMsDiag(int minK, int maxK)
     OMPL_INFORM("Done building per component diagonal GMMs => compGMMsDiag_");
 }
 
-#include <armadillo>
-#include <iostream>
-#include <unordered_map>
 
-// You already have your gmm_diag in compGMMsDiag_ for each comp.
-// We'll define a function to compute Bhattacharyya distance:
-
-double bhattacharyyaDistance(const arma::vec &m1, const arma::mat &S1,
-                             const arma::vec &m2, const arma::mat &S2)
+arma::gmm_diag SDCL::buildSingleCovDiagGMM(const arma::mat& dataset, int k)
 {
-    // Average covariance
-    arma::mat Sigma = 0.5 * (S1 + S2);
+    using namespace arma;
 
-    arma::vec diff = m1 - m2;
-    // (1/8) * diff^T * Sigma^-1 * diff
-    arma::mat SigmaInv = arma::inv(Sigma);
-    double term1 = 0.125 * arma::as_scalar(diff.t() * SigmaInv * diff);
+    size_t d = dataset.n_rows;
+    size_t N = dataset.n_cols;
 
-    // 0.5 * ln( |Sigma| / sqrt(|S1| * |S2| ) )
-    double detS  = arma::det(Sigma);
-    double detS1 = arma::det(S1);
-    double detS2 = arma::det(S2);
-    double term2 = 0.5 * std::log(detS / std::sqrt(detS1 * detS2));
-
-    return term1 + term2;
-}
-
-// Helper to convert an arma::gmm_diag cluster’s diagonal cov + mean => full mat
-arma::mat diagCovToMat(const arma::vec &diagVar)
-{
-    // Just put the diagonal entries in a full NxN matrix
-    return arma::diagmat(diagVar);
-}
-
-// Suppose you call this somewhere in SDCL.cpp
-void SDCL::computePairwiseBD()
-{
-    // compGMMsDiag_ is your map<componentID, gmm_diag>
-    // We want to iterate over pairs (compA, compB) with compA != compB
-    std::vector<unsigned long> compIDs;
-    compIDs.reserve(compGMMsDiag_.size());
-    for (auto &kv : compGMMsDiag_)
-        compIDs.push_back(kv.first);
-
-    // Loop over pairs of distinct components
-    for (size_t i = 0; i < compIDs.size(); ++i)
+    // 1) K-means to get cluster centroids
+    mat centroids(d, k);
+    bool kmSuccess = kmeans(centroids, dataset, k, static_spread, 10, false);
+    if(!kmSuccess)
     {
-        unsigned long compA = compIDs[i];
-        const auto &modelA = compGMMsDiag_.at(compA);
+        OMPL_WARN("K-means failed for k=%d", k);
+        return gmm_diag(); // empty
+    }
 
-        for (size_t j = i + 1; j < compIDs.size(); ++j) // j>i => skip same or duplicates
+    // 2) Assign each point, gather membership
+    rowvec assignments(N, fill::zeros);
+    vec clusterCounts(k, fill::zeros);
+
+    for(size_t i=0; i < N; i++)
+    {
+        double bestDist = DBL_MAX;
+        uword bestC = 0;
+        for(int c=0; c < k; c++)
         {
-            unsigned long compB = compIDs[j];
-            const auto &modelB = compGMMsDiag_.at(compB);
-
-            // Number of clusters in each GMM
-            unsigned int kA = modelA.n_gaus();
-            unsigned int kB = modelB.n_gaus();
-
-            // For each cluster in compA and compB
-            for (unsigned int cA = 0; cA < kA; ++cA)
+            double dsq = accu(square(dataset.col(i) - centroids.col(c)));
+            if(dsq < bestDist)
             {
-                // means.col(cA) => cluster cA's mean
-                arma::vec muA = modelA.means.col(cA);
-                // dcovars.col(cA) => cluster cA's diagonal variances
-                arma::mat covA = diagCovToMat(modelA.dcovs.col(cA));
-
-                for (unsigned int cB = 0; cB < kB; ++cB)
-                {
-                    arma::vec muB = modelB.means.col(cB);
-                    arma::mat covB = diagCovToMat(modelB.dcovs.col(cB));
-
-                    double bd = bhattacharyyaDistance(muA, covA, muB, covB);
-// Skip if BD is extremely close to zero
-// (use a small epsilon to account for floating-point rounding errors)
-if (std::fabs(bd) < 1e-9)
-    continue;  // Don't print or store
-
-                    // Print or store the result
-                    std::cout
-                      << "[Comp " << compA << ", Clust " << cA << "] vs "
-                      << "[Comp " << compB << ", Clust " << cB << "] => BD = "
-                      << bd << std::endl;
-                }
+                bestDist = dsq;
+                bestC = c;
             }
         }
+        assignments[i] = bestC;
+        clusterCounts[bestC]++;
     }
+
+    // 3) Refine means
+    centroids.zeros();
+    for(size_t i=0; i < N; i++)
+    {
+        uword c = (uword) assignments[i];
+        centroids.col(c) += dataset.col(i);
+    }
+    for(int c=0; c < k; c++)
+    {
+        if(clusterCounts[c] > 0)
+            centroids.col(c) /= clusterCounts[c];
+    }
+
+    // 4) Weights
+    vec weights = clusterCounts / double(N);
+
+    // 5) single diag => compute overall variance from entire dataset
+    vec globalMean = mean(dataset, 1);
+    vec globalVar(d, fill::zeros);
+
+    for(size_t i=0; i < N; i++)
+    {
+        vec diff = dataset.col(i) - globalMean;
+        globalVar += diff % diff;
+    }
+    globalVar /= double(N);
+    // clamp or fix tiny variance
+    globalVar.for_each( [](double &val) { if(val<1e-12) val=1e-12; } );
+
+    // Construct the gmm_diag
+    //gmm_diag model;
+    //model.means.set_size(d, k);
+    //model.dcovs.set_size(d, k);
+    //model.hefts.set_size(k);
+    // Prepare local structures for means, dcovs, hefts
+    //  Then use model.set_params(...) to avoid direct writes to const fields
+
+    arma::mat outMeans(d, k, fill::zeros);
+    arma::mat outDcovs(d, k, fill::zeros);
+    arma::rowvec outHefts(k, fill::zeros);
+
+    for(int c=0; c < k; c++)
+    {
+        //model.means.col(c) = centroids.col(c);
+        //model.hefts[c]     = weights[c];
+        //model.dcovs.col(c) = globalVar;  // same diagonal for all
+        outMeans.col(c) = centroids.col(c); // each column is the mean
+        outHefts(c)     = weights[c];       // store mixture weight
+        outDcovs.col(c) = globalVar;        // single diagonal for all
+    
+    }
+
+    // ensure sum of weights = 1
+    double sumW = accu(outHefts);
+    //if(sumW > 0) model.hefts /= sumW;
+
+
+    if (sumW > 0)
+    outHefts = outHefts * (1.0 / sumW);
+
+    // 7) Build the gmm_diag via set_params
+    arma::gmm_diag model;
+    // bool set_params(...)
+    //   set_params( means, dcovs, heaps, normalise_hefts, check_empty )
+    model.set_params(outMeans, outDcovs, outHefts);
+                                    
+    //if(!success)
+    //{
+    //    OMPL_WARN("set_params() failed for single-cov GMM k=%d", k);
+    //    return gmm_diag(); // empty
+    //}
+
+    return model;  // 'model' now has your single diag
 }
 
 
 
-
-// 2D Scatter plot
-#ifdef USE_SCIPLOT
-#include <sciplot/sciplot.hpp>
-#endif
-
-void SDCL::plotPerComponentGMMClusters(const std::string &filename)
+void SDCL::trainGMMArmadilloBIC(const std::vector<std::vector<double>> &data,
+                                int minK, int maxK)
 {
-#ifdef USE_SCIPLOT
-    using namespace arma;
-    using namespace sciplot;
-
-    // Step A: group the graph by connected component
-    std::unordered_map<unsigned long, std::vector<Vertex>> compVerts;
-    for (auto v : boost::make_iterator_range(boost::vertices(g_)))
+    if (data.empty() || minK <= 0 || maxK < minK)
     {
-        unsigned long cID = (unsigned long)disjointSets_.find_set(v);
-        compVerts[cID].push_back(v);
+        OMPL_INFORM("No data or invalid range for single diag GMM BIC training.");
+        return;
+    }
+    size_t dim = data[0].size();
+    size_t N   = data.size();
+    arma::mat dataset(dim, N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        for (size_t d = 0; d < dim; d++)
+            dataset(d, i) = data[i][d];
     }
 
-    // Make a Plot2D
-    Plot2D plot;
-    plot.legend().atOutsideBottom().displayHorizontal().displayExpandWidthBy(2).fontSize(5);
-    plot.xlabel("X");
-    plot.ylabel("Y");
+    double bestBIC = std::numeric_limits<double>::infinity();
+    arma::gmm_diag bestModel;
 
-    // Set the x and y ranges
-    plot.xrange(-4.0, 4.0);
-    plot.yrange(-4.0, 4.0);
-
-    // Step B: for each component, look up its GMM in compGMMsDiag_
-    for (auto &kv : compVerts)
+    for(int k = minK; k <= maxK; k++)
     {
-        unsigned long cID = kv.first;
-        // if we have no GMM for that comp, skip:
-        if (compGMMsDiag_.find(cID) == compGMMsDiag_.end())
-            continue;
-
-        const arma::gmm_diag &model = compGMMsDiag_.at(cID);
-
-        // Gather just the states for this comp into an arma::mat
-        size_t N = kv.second.size();
-        if (N < 2)
-            continue;
-        unsigned int dim = si_->getStateDimension();
-        arma::mat dataset(dim, N);
-        for (size_t i=0; i<N; i++)
+        arma::gmm_diag model = buildSingleCovDiagGMM(dataset, k);
+        if(model.means.n_cols == 0)
         {
-            Vertex v = kv.second[i];
-            auto *st = stateProperty_[v]->as<base::RealVectorStateSpace::StateType>();
-            for (unsigned int d=0; d<dim; d++)
-                dataset(d,i) = st->values[d];
-        }
-
-        // If dimension isn’t 2, skip plotting or special‐case it
-        if (dim != 2)
-        {
-            OMPL_INFORM("plotPerComponentGMMClusters: skipping comp %lu, dim != 2", cID);
+            // means it failed or is empty
             continue;
         }
 
-        // Use the model to assign each sample to a cluster
-        arma::urowvec assignments = model.assign(dataset, arma::eucl_dist);
+        // compute log-likelihood
+        // Use log_p(...) for the entire dataset
+        arma::rowvec logpVec = model.log_p(dataset); // rowvec of length N
+        double ll = arma::accu(logpVec);
+        // single diag => p = (k - 1) + k*dim + dim
+        double p = (k - 1) + double(k*dim) + double(dim);
 
-        // Now group points by cluster ID
-        std::unordered_map<unsigned int, std::vector<double>> X, Y;
-        for (size_t i=0; i<N; i++)
+        double bic = -2.0 * ll + p * std::log((double)N);
+
+        OMPL_INFORM("k=%d => logLik=%.2f, BIC=%.2f", k, ll, bic);
+
+        if(bic < bestBIC)
         {
-            unsigned int cid = assignments[i];
-            double xVal = dataset(0,i);
-            double yVal = dataset(1,i);
-            X[cid].push_back(xVal);
-            Y[cid].push_back(yVal);
+            bestBIC  = bic;
+            bestModel= model;
         }
 
-        // Now draw each cluster in a different style
-        for (auto &ckv : X)
-        {
-            unsigned int clusterID = ckv.first;
-            auto &xs = ckv.second;
-            auto &ys = Y[clusterID];
-
-            std::string label = "comp " + std::to_string(cID) + 
-                                ", cluster " + std::to_string(clusterID);
-            plot.drawPoints(xs, ys).pointSize(0.5).label(label);
-            //draw.pointType((int)clusterID + 1);
-            //draw.lineColor("red").fillColor("red"); // force a color (instead of the default palette)
-
-        }
     }
 
-    // Finally save
-    Figure fig = {{ plot }};
-    Canvas canvas = {{ fig }};
-    canvas.title("Per-Component GMM Clusters (2D)");
-    canvas.save(filename);
+    OMPL_INFORM("Single diag => best BIC=%.2f", bestBIC);
 
-    std::cout<<"Saved per‐component GMM cluster plot to "<< filename <<"\n";
-#else
-    std::cout<<"(no sciplot) skipping plotPerComponentGMMClusters\n";
-#endif
+    // store it for later
+    armadilloDiagGMM_ = bestModel;
 }
 
 
 
+// Build a single full-covariance Gaussian for each connected component
+//void SDCL::buildPerComponentGMMs()
+//{
+    // 1) Clear out the map in case we've built GMMs before
+//    perComponentGMMs_.clear();
 
+    // 2) Gather each component's states
+    //    We'll collect them in a map: componentID -> (arma::mat of points)
+ //   std::unordered_map<unsigned long, arma::mat> compData;
+
+    // First pass: figure out how many states are in each component,
+    // so we can pre-allocate properly. We'll also track the dimension.
+//    unsigned int dim = si_->getStateDimension();
+//    std::unordered_map<unsigned long, size_t> compSizes;
+
+//    for (auto v : boost::make_iterator_range(boost::vertices(g_)))
+//    {
+        // find representative
+//        Vertex c = disjointSets_.find_set(v);
+ //       unsigned long compID = static_cast<unsigned long>(c);
+  //      compSizes[compID] += 1;
+    //}
+
+    // Now actually allocate each arma::mat with (dim rows) x (N columns)
+    //for (auto &kv : compSizes)
+    //{
+    //    unsigned long cID = kv.first;
+    //    size_t N         = kv.second;
+    //    compData[cID].set_size(dim, N); // (dim x N)
+    //}
+
+    // 3) Fill each matrix with that component's states
+    //    We maintain a small "current column index" per component
+    //std::unordered_map<unsigned long, size_t> idxPerComp;
+    //for (auto v : boost::make_iterator_range(boost::vertices(g_)))
+    //{
+    //    Vertex c       = disjointSets_.find_set(v);
+    //    unsigned long compID = static_cast<unsigned long>(c);
+
+    //    auto *rv = stateProperty_[v]->as<base::RealVectorStateSpace::StateType>();
+    //    size_t col = idxPerComp[compID];  // 0-based
+    //    for (unsigned int d=0; d<dim; d++)
+    //        compData[compID](d, col) = rv->values[d];
+
+    //    idxPerComp[compID] = col+1; // increment
+    //}
+
+    // 4) For each connected component, we have a matrix of points => build a gmm_full with K=1
+    //for (auto &entry : compData)
+    //{
+    //    unsigned long compID = entry.first;
+    //    arma::mat &dataset   = entry.second; // each col is a sample
+
+        // We'll create a gmm_full with exactly 1 Gaussian component
+//        arma::gmm_full model;
+  //      model.create(1, dim); // 1 component, 'dim' dimension
+        // Means: set_size(dim, 1)
+        // Covs : 3D: we can do model.covariances.resize(1) etc.
+
+        // We compute mean & cov ourselves:
+    //    arma::vec mu = arma::mean(dataset, 1); // dim x 1
+        // Compute covariance
+        //  (the columns of dataset are points, so we do .each_col() - mu, etc.)
+      //  arma::mat centered = dataset;
+      //  centered.each_col() -= mu;
+      //  arma::mat cov = (centered * centered.t()) / (double)dataset.n_cols; 
+        // that’s a full covariance
+
+        // Put them into model: 1 component
+        // We must do something like:
+        //    model.means.slice(0) or so, except we have no direct slice. Instead:
+        // Because .create(...) sets model.means, model.fcovs, model.hefts, etc.
+        // We can do:
+       // model.means.col(0)      = mu; // 1st col is the mean
+       // model.fcovs(0)          = cov; // the 0th covariance
+      //  model.hefts(0)         = 1.0; // single component => weight=1
+
+        // So now we have a GMM with one component that has mean/cov
+        // Store it in perComponentGMMs_
+       // perComponentGMMs_[compID] = model;
+    //}
+
+    // That’s it. Now each connected component cID is associated
+    // with an “arma::gmm_full” that has a single Gaussian with its own covariance.
+    // If you want "diag" instead, you can do gmm_diag instead of gmm_full.
+    // Done!
+//}
 
 std::vector<std::vector<double>> SDCL::collectRoadmapStates() const
 {
@@ -1056,12 +1117,15 @@ std::vector<std::vector<double>> SDCL::collectRoadmapStates() const
     }
     return data;
 }
-
+// 2D Scatter plot
+#ifdef USE_SCIPLOT
+#include <sciplot/sciplot.hpp>
+//#endif
 
 //#include "SDCL.h"
 void SDCL::plotRoadmapScatter(const std::string &filename) //const
 {
-#ifdef USE_SCIPLOT
+//#ifdef USE_SCIPLOT
 
     // If we have sciplot, do the real plotting:
     std::lock_guard<std::mutex> lock(graphMutex_);
@@ -1086,7 +1150,7 @@ void SDCL::plotRoadmapScatter(const std::string &filename) //const
 
     using namespace sciplot; 
     Plot2D plot;
-    plot.legend().atOutsideBottom().displayHorizontal().displayExpandWidthBy(2).fontSize(7);
+    plot.legend().atTopRight().displayHorizontal().displayExpandWidthBy(2).fontSize(7);
     // gather *all* points from all components in one big set of arrays
     std::vector<double> xsAll, ysAll;
     xsAll.reserve( X.size() * 100 ); // optional rough reserve
@@ -1103,7 +1167,7 @@ void SDCL::plotRoadmapScatter(const std::string &filename) //const
     }
 
     // Plot all of them at once (optional label like "All points")
-    plot.drawPoints(xsAll, ysAll).pointSize(0.5).label("All components");
+    plot.drawPoints(xsAll, ysAll).pointSize(1.0).label("All components");
     
     // Each component separately, then loop again and do a different label / color for each comp.
     for (auto &kv : X)
@@ -1113,7 +1177,7 @@ void SDCL::plotRoadmapScatter(const std::string &filename) //const
         std::vector<double> &ys = Y[compID];
 
         std::string label = "component " + std::to_string(compID);
-        plot.drawPoints(xs, ys).pointSize(0.5).label(label);
+        plot.drawPoints(xs, ys).pointSize(1.0).label(label);
     }
 
     Figure fig = {{ plot }};
@@ -1129,3 +1193,90 @@ void SDCL::plotRoadmapScatter(const std::string &filename) //const
 #endif
 }
 
+
+void SDCL::plotGMMClusters(const std::string &filename)
+{
+#ifdef USE_SCIPLOT
+    using namespace arma;
+    using namespace sciplot;
+
+    std::lock_guard<std::mutex> lock(graphMutex_);
+
+    // 1) Collect states into a std::vector<std::vector<double>>.
+    auto dataVec = collectRoadmapStates();
+    if (dataVec.empty())
+    {
+        std::cout << "No roadmap data to plot.\n";
+        return;
+    }
+
+    // only handle 2D for plotting:
+    size_t dim = dataVec[0].size();
+    if (dim != 2)
+    {
+        std::cout << "plotGMMClusters() only supports 2D data.\n";
+        return;
+    }
+
+    // 2) Convert to arma::mat
+    size_t N = dataVec.size();
+    arma::mat dataset(dim, N);
+    for (size_t i = 0; i < N; ++i)
+    {
+        for (size_t d = 0; d < dim; d++)
+            dataset(d, i) = dataVec[i][d];
+    }
+
+    // Ensure GMM is valid (trained).
+    if (armadilloDiagGMM_.means.n_cols == 0)
+    {
+        std::cout << "GMM is empty (not trained?). Cannot plot clusters.\n";
+        return;
+    }
+
+    // 3) Assign each sample to its cluster.
+    //    Must specify the distance mode, e.g. eucl_dist.
+    arma::urowvec assignments = armadilloDiagGMM_.assign(dataset, arma::eucl_dist);
+
+    // 4) Group points by cluster ID.
+    std::unordered_map<unsigned int, std::vector<double>> X, Y;
+    for (size_t i = 0; i < N; i++)
+    {
+        unsigned int cid = assignments[i];
+        double xVal = dataset(0, i);
+        double yVal = dataset(1, i);
+
+        X[cid].push_back(xVal);
+        Y[cid].push_back(yVal);
+    }
+
+    // 5) Make a sciplot::Plot2D, set labels separately.
+    Plot2D plot;
+    plot.legend().atTopRight().displayHorizontal().displayExpandWidthBy(2).fontSize(8);
+
+    plot.xlabel("X");
+    plot.ylabel("Y");
+
+    // Plot each cluster with a distinct label.
+    for (auto &kv : X)
+    {
+        unsigned int cID = kv.first;
+        const auto &xs = kv.second;
+        const auto &ys = Y[cID];
+
+        std::string label = "Cluster " + std::to_string(cID);
+        plot.drawPoints(xs, ys).pointSize(1.5).label(label);
+    }
+
+    // 6) Wrap into a figure, save to disk.
+    Figure fig = {{ plot }};
+    Canvas canvas = {{ fig }};
+    canvas.title("GMM Clusters (2D)");
+    canvas.save(filename);
+
+    std::cout << "Saved GMM cluster-assignments plot to " << filename << "\n";
+#else
+    // If sciplot not available:
+    std::cout << "No sciplot available; plotGMMClusters() is a stub.\n";
+#endif
+}

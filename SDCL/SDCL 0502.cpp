@@ -839,98 +839,6 @@ void SDCL::buildPerComponentGMMsDiag(int minK, int maxK)
     OMPL_INFORM("Done building per component diagonal GMMs => compGMMsDiag_");
 }
 
-#include <armadillo>
-#include <iostream>
-#include <unordered_map>
-
-// You already have your gmm_diag in compGMMsDiag_ for each comp.
-// We'll define a function to compute Bhattacharyya distance:
-
-double bhattacharyyaDistance(const arma::vec &m1, const arma::mat &S1,
-                             const arma::vec &m2, const arma::mat &S2)
-{
-    // Average covariance
-    arma::mat Sigma = 0.5 * (S1 + S2);
-
-    arma::vec diff = m1 - m2;
-    // (1/8) * diff^T * Sigma^-1 * diff
-    arma::mat SigmaInv = arma::inv(Sigma);
-    double term1 = 0.125 * arma::as_scalar(diff.t() * SigmaInv * diff);
-
-    // 0.5 * ln( |Sigma| / sqrt(|S1| * |S2| ) )
-    double detS  = arma::det(Sigma);
-    double detS1 = arma::det(S1);
-    double detS2 = arma::det(S2);
-    double term2 = 0.5 * std::log(detS / std::sqrt(detS1 * detS2));
-
-    return term1 + term2;
-}
-
-// Helper to convert an arma::gmm_diag cluster’s diagonal cov + mean => full mat
-arma::mat diagCovToMat(const arma::vec &diagVar)
-{
-    // Just put the diagonal entries in a full NxN matrix
-    return arma::diagmat(diagVar);
-}
-
-// Suppose you call this somewhere in SDCL.cpp
-void SDCL::computePairwiseBD()
-{
-    // compGMMsDiag_ is your map<componentID, gmm_diag>
-    // We want to iterate over pairs (compA, compB) with compA != compB
-    std::vector<unsigned long> compIDs;
-    compIDs.reserve(compGMMsDiag_.size());
-    for (auto &kv : compGMMsDiag_)
-        compIDs.push_back(kv.first);
-
-    // Loop over pairs of distinct components
-    for (size_t i = 0; i < compIDs.size(); ++i)
-    {
-        unsigned long compA = compIDs[i];
-        const auto &modelA = compGMMsDiag_.at(compA);
-
-        for (size_t j = i + 1; j < compIDs.size(); ++j) // j>i => skip same or duplicates
-        {
-            unsigned long compB = compIDs[j];
-            const auto &modelB = compGMMsDiag_.at(compB);
-
-            // Number of clusters in each GMM
-            unsigned int kA = modelA.n_gaus();
-            unsigned int kB = modelB.n_gaus();
-
-            // For each cluster in compA and compB
-            for (unsigned int cA = 0; cA < kA; ++cA)
-            {
-                // means.col(cA) => cluster cA's mean
-                arma::vec muA = modelA.means.col(cA);
-                // dcovars.col(cA) => cluster cA's diagonal variances
-                arma::mat covA = diagCovToMat(modelA.dcovs.col(cA));
-
-                for (unsigned int cB = 0; cB < kB; ++cB)
-                {
-                    arma::vec muB = modelB.means.col(cB);
-                    arma::mat covB = diagCovToMat(modelB.dcovs.col(cB));
-
-                    double bd = bhattacharyyaDistance(muA, covA, muB, covB);
-// Skip if BD is extremely close to zero
-// (use a small epsilon to account for floating-point rounding errors)
-if (std::fabs(bd) < 1e-9)
-    continue;  // Don't print or store
-
-                    // Print or store the result
-                    std::cout
-                      << "[Comp " << compA << ", Clust " << cA << "] vs "
-                      << "[Comp " << compB << ", Clust " << cB << "] => BD = "
-                      << bd << std::endl;
-                }
-            }
-        }
-    }
-}
-
-
-
-
 // 2D Scatter plot
 #ifdef USE_SCIPLOT
 #include <sciplot/sciplot.hpp>
@@ -1129,3 +1037,47 @@ void SDCL::plotRoadmapScatter(const std::string &filename) //const
 #endif
 }
 
+#include <armadillo>
+#include <iostream>
+
+// Compute Bhattacharyya distance between two Gaussians:
+//   N(m1, S1) and N(m2, S2).
+double bhattacharyyaDistance(const arma::vec &m1,
+                             const arma::mat &S1,
+                             const arma::vec &m2,
+                             const arma::mat &S2)
+{
+    // 1. Average covariance
+    arma::mat Sigma = 0.5 * (S1 + S2);
+
+    // 2. Quadratic term: (1/8) * (diff^T * Sigma^-1 * diff)
+    arma::vec diff = m1 - m2;
+    arma::mat SigmaInv = arma::inv(Sigma);
+    double term1 = 0.125 * arma::as_scalar(diff.t() * SigmaInv * diff);
+
+    // 3. Determinant term: 0.5 * ln( |Sigma| / sqrt(|S1| * |S2| ) )
+    double detS  = arma::det(Sigma);
+    double detS1 = arma::det(S1);
+    double detS2 = arma::det(S2);
+    double term2 = 0.5 * std::log(detS / std::sqrt(detS1 * detS2));
+
+    return term1 + term2;
+}
+
+int main()
+{
+    // Example usage:
+    // Suppose dimension d = 2
+    arma::vec m1(2), m2(2);
+    m1 << 0.0 << 1.0;   // [0, 1]^T
+    m2 << 1.5 << 0.5;   // [1.5, 0.5]^T
+
+    // Covariances: 2x2
+    arma::mat S1 = 0.3 * arma::eye<arma::mat>(2,2); // scale the identity by 0.3
+    arma::mat S2 = 0.5 * arma::eye<arma::mat>(2,2); // scale the identity by 0.5
+
+    double bd = bhattacharyyaDistance(m1, S1, m2, S2);
+    std::cout << "Bhattacharyya Distance = " << bd << std::endl;
+
+    return 0;
+}

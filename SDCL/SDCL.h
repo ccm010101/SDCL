@@ -347,18 +347,26 @@ public:
     void plotRoadmapScatter(const std::string &filename); //scatterplot void plotRoadmapScatter(const std::string &filename) const;
     //mlpack::gmm::GMM gmmModel_; // store best GMM if desired
     arma::gmm_diag buildSingleCovDiagGMM(const arma::mat &dataset, int k);
-
+    void buildPerComponentGMMsDiag(int minK, int maxK);
     //void trainGMMArmadilloBIC(const std::vector<std::vector<double>> &data,
     //                        int minComponents, int maxComponents);
-    void plotGMMClusters(const std::string &filename);
-
+    //void plotGMMClusters(const std::string &filename);
+    void plotPerComponentGMMClusters(const std::string &filename);
     void trainGMMArmadilloBIC(const std::vector<std::vector<double>>& data,
                               int param1,
                               int param2);
+    void computePairwiseBD();
 
 private:
  // store the best model as an Armadillo gmm_diag:
     arma::gmm_diag armadilloDiagGMM_; 
+    // one GMM per component ID
+    //std::unordered_map<unsigned long, arma::gmm_diag> perComponentGMMs_;
+
+    //std::unordered_map<unsigned long, arma::gmm_full> perComponentGMMs_;
+
+    std::unordered_map<unsigned long, arma::gmm_diag> compGMMsDiag_;  // one diag GMM per component
+
 //#endif
 };
 

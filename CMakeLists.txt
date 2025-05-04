@@ -20,6 +20,9 @@ find_package(Boost 1.54 QUIET REQUIRED COMPONENTS serialization filesystem syste
 include_directories(${Boost_INCLUDE_DIR})
 add_definitions(-DBOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS)
 
+find_package(Armadillo REQUIRED)
+
+
 # ------------------- 1) Enable pkg-config -------------------
 find_package(PkgConfig REQUIRED)
 
@@ -98,6 +101,9 @@ target_link_libraries(SDCL PRIVATE ${OMPL_LIBRARIES})
 target_link_libraries(SDCL PRIVATE ${LZ4_LIBRARIES})
 # target_link_libraries(SDCL PRIVATE "nlopt")
 # target_link_libraries(SDCL PRIVATE "thundersvm")
+target_link_libraries(SDCL PRIVATE armadillo)
+target_link_libraries(SDCL PRIVATE lapack blas)
+
 
 target_include_directories(SDCL PRIVATE "/usr/local/include")
 target_include_directories(SDCL PRIVATE "${OMPL_INCLUDE_DIRS}")
@@ -138,6 +144,8 @@ target_link_libraries(RunSDCL
         # ${AMINO_GL_LIBRARIES}
         ${OMPL_LIBRARIES}
 )
+
+target_link_libraries(RunSDCL PRIVATE SDCL armadillo)
 
 target_include_directories(RunSDCL
     PRIVATE
