@@ -470,16 +470,8 @@ ompl::base::PlannerStatus SDCL::solve(const base::PlannerTerminationCondition &p
     // // SVM stats (commented out)
     OMPL_INFORM("Total training time is %f, total sampling time is %f.", stats_.training_time, stats_.sampling_time);
     
-    //reportShortComponents(100);
-    auto shortList = reportShortComponents(100); // threshold=5
-    for (auto compID : shortList)
-    {
-        // e.g., sample from the GMM if it exists
-        // or do special bridging logic, etc.
-    }
-
-    return sol ? base::PlannerStatus::EXACT_SOLUTION : base::PlannerStatus::TIMEOUT;
-
+    reportShortComponents(100);
+    
     if (sol)
     {
         base::PlannerSolution psol(sol);
@@ -757,41 +749,37 @@ ompl::base::Cost SDCL::costHeuristic(Vertex u, Vertex v) const
 //   ... etc ...
 
 
-std::vector<unsigned long> SDCL::reportShortComponents(std::size_t maxSize)
+
+void SDCL::reportShortComponents(std::size_t maxSize)
 {
     // 1) Group vertices by component
     std::unordered_map<unsigned long, std::vector<Vertex>> compVertices;
 
     for (auto v : boost::make_iterator_range(boost::vertices(g_)))
     {
-        unsigned long cID = static_cast<unsigned long>(disjointSets_.find_set(v));
+        unsigned long cID = (unsigned long)disjointSets_.find_set(v);
         compVertices[cID].push_back(v);
     }
 
-    // This will hold all the "short" component IDs
-    std::vector<unsigned long> shortComps;
-
-    // 2) Identify and print the "short" components
+    // 2) Identify and print the “short” components
+    //std::cout << "Components with <= " << maxSize << " states:\n";
     OMPL_INFORM("Components with <= %zu states:", maxSize);
 
     for (const auto &kv : compVertices)
     {
-        unsigned long cID = kv.first;
-        std::size_t compSize = kv.second.size();
+        unsigned long cID     = kv.first;
+        //const auto &vertices  = kv.second;
+        std::size_t compSize  = kv.second.size();
 
         if (compSize <= maxSize)
         {
-            // Print
+            //std::cout << "  - Component " << cID 
+            //          << " has " << compSize << " states.\n";
             OMPL_INFORM("  - Component %lu has %zu states.", cID, compSize);
-            // Also store
-            shortComps.push_back(cID);
+
         }
     }
-
-    return shortComps;
 }
-
-
 
 
 
@@ -1189,176 +1177,3 @@ void SDCL::plotRoadmapScatter(const std::string &filename) //const
 #endif
 }
 
-#include "SDCL.h"  // includes your class definition
-#include <armadillo>
-#include <iostream>
-#include <unordered_map>
-
-// A free function (not a member of SDCL)
-static void productOfGaussians(
-    const std::vector<arma::vec> &means,
-    const std::vector<arma::mat> &covs,
-    arma::vec &muProd,
-    arma::mat &covProd)
-{
-    using namespace arma;
-    size_t N = means.size();
-    if (N == 0)
-    {
-        std::cerr << "[productOfGaussians] No Gaussians provided!\n";
-        return;
-    }
-    size_t d = means[0].n_elem;
-
-    mat sumPrec(d, d, fill::zeros);
-    vec sumPrecMu(d, fill::zeros);
-
-    for (size_t i = 0; i < N; i++)
-    {
-        const mat &Cov_i = covs[i];
-        const vec &m_i   = means[i];
-        mat Prec_i = inv(Cov_i);
-        sumPrec   += Prec_i;
-        sumPrecMu += Prec_i * m_i;
-    }
-
-    covProd = inv(sumPrec);
-    muProd  = covProd * sumPrecMu;
-}
-void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
-{
-    // 1) get the short comps
-    std::vector<unsigned long> shortComps = reportShortComponents(maxSize);
-
-    // We'll gather all clusters from these short components into one big product
-    std::vector<arma::vec> means;
-    std::vector<arma::mat> covs;
-
-    // We'll also need to see how many states each component actually has.
-    // If a comp has exactly 1 state, we do the fallback tiny Gaussian approach.
-
-    // Let's first group the vertices by component
-    std::unordered_map<unsigned long, std::vector<Vertex>> compVerts;
-    for (auto v : boost::make_iterator_range(boost::vertices(g_)))
-    {
-        unsigned long cID = (unsigned long)disjointSets_.find_set(v);
-        compVerts[cID].push_back(v);
-    }
-
-    for (unsigned long compID : shortComps)
-    {
-        // Check how many states in that comp
-        auto &verts = compVerts[compID];
-        std::size_t compSize = verts.size();
-
-        // If there is exactly 1 state, build a fallback tiny Gaussian
-        if (compSize == 1)
-        {
-            Vertex theOnlyV = verts[0];
-            const base::State* singleSt = stateProperty_[theOnlyV];
-            auto *rv = singleSt->as<ompl::base::RealVectorStateSpace::StateType>();
-            unsigned int d = si_->getStateDimension();
-
-            arma::vec mu(d);
-            for (unsigned int i = 0; i < d; i++)
-                mu[i] = rv->values[i];
-
-            // small diagonal
-            double eps = 1e-4; 
-            arma::vec diagVar(d, arma::fill::ones);
-            diagVar *= eps;
-            arma::mat covMat = arma::diagmat(diagVar);
-
-            means.push_back(mu);
-            covs.push_back(covMat);
-
-            // no need to skip GMM, we used fallback
-            continue;
-        }
-
-        // If there are >= 2 states, see if we have a GMM
-        auto it = compGMMsDiag_.find(compID);
-        if (it == compGMMsDiag_.end())
-        {
-            // No GMM. You could do a fallback approach for 2..N states as well, or skip
-            OMPL_INFORM("No GMM found for component %lu (size=%zu), skipping component.", compID, compSize);
-            continue;
-        }
-
-        const arma::gmm_diag &model = it->second;
-        // In newer Armadillo, 'n_gaus()' is a function that returns an arma::uword
-        arma::uword k = model.n_gaus();
-        if (k == 0)
-        {
-            OMPL_INFORM("GMM for comp %lu has zero clusters, skipping.", compID);
-            continue;
-        }
-
-        // For each cluster, get mean & diag cov (the field is likely 'dcovs' in older versions)
-        // If your version is actually 'model.dcovs', do that:
-        for (arma::uword c = 0; c < k; c++)
-        {
-            arma::vec m = model.means.col(c);  
-            // 'dcovs' is the typical field name in Armadillo's gmm_diag:
-            arma::vec dCov = model.dcovs.col(c);  
-            arma::mat covMat = arma::diagmat(dCov);
-
-            means.push_back(m);
-            covs.push_back(covMat);
-        }
-    }
-
-    // 2) If we have at least one cluster/ fallback:
-    if (means.empty())
-    {
-        OMPL_INFORM("No clusters or fallback single-states from short comps. Nothing to do.");
-        return;
-    }
-
-    arma::vec muProd;
-    arma::mat covProd;
-    productOfGaussians(means, covs, muProd, covProd);
-
-    OMPL_INFORM("Product of Gaussians across short comps => muProd:");
-    muProd.t().print(std::cout, "muProd:");
-
-    OMPL_INFORM("covProd = ");
-    covProd.print(std::cout);
-
-    // 3) (Optional) sample from the product distribution and add to the roadmap
-{
-    unsigned int nSamples = 2000; // however many you want
-    arma::mat L = arma::chol(covProd, "lower"); // Cholesky factor
-
-    for (unsigned int i = 0; i < nSamples; i++)
-    {
-        // 3.1) Draw a random vector z ~ N(0,I)
-        arma::vec z = arma::randn<arma::vec>(muProd.n_elem);
-        // x = muProd + L*z
-        arma::vec x = muProd + L * z;
-
-        // 3.2) Convert 'x' into an OMPL state
-        base::State *sampleState = si_->allocState();
-        auto *rv = sampleState->as<ompl::base::RealVectorStateSpace::StateType>();
-        for (unsigned int d = 0; d < muProd.n_elem; d++)
-            rv->values[d] = x[d];
-
-        // 3.3) Check collisions
-        if (si_->isValid(sampleState))
-        {
-            OMPL_INFORM("Sample %d: [%.3f, %.3f] is valid, adding to roadmap", i, x[0], x[1]);
-
-            // 3.4) If valid, add to the roadmap
-            addMilestone(sampleState);
-        }
-        else
-        {
-            OMPL_INFORM("Sample %d: [%.3f, %.3f] is invalid, discarding", i, x[0], x[1]);
-
-            // free invalid states
-            si_->freeState(sampleState);
-        }
-    }
-}
-
-}

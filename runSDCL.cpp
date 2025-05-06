@@ -235,16 +235,15 @@ int main(int argc, char** argv)
         //planner->trainGMMArmadilloBIC(data, minK, maxK);
 
         //planner->buildPerComponentGMMs();
-
+        planner->plotRoadmapScatter("roadmapBefore.png");
         planner->buildPerComponentGMMsDiag(1, 5);
         planner->computePairwiseBD();
-        planner->plotPerComponentGMMClusters("clustersPerComp.png");
-
+        planner->sampleFromProductOfShortComps(99); 
         // 10) Plot using the *actual* planner (which holds the real roadmap).
         //     This assumes your SDCL class can safely plot even if no solution was found.
-        planner->plotRoadmapScatter("roadmapScatter.png");
+        planner->plotRoadmapScatter("roadmapAfter.png");
         //planner->plotGMMClusters("clusters.png");
-    
+        planner->plotPerComponentGMMClusters("clustersPerComp.png");
         // Alternatively, if you want to overlay the roadmap onto
         // your environment's image, you might do something like:
         //

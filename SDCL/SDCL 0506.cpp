@@ -1325,40 +1325,15 @@ void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
     OMPL_INFORM("covProd = ");
     covProd.print(std::cout);
 
-    // 3) (Optional) sample from the product distribution and add to the roadmap
-{
-    unsigned int nSamples = 2000; // however many you want
-    arma::mat L = arma::chol(covProd, "lower"); // Cholesky factor
-
-    for (unsigned int i = 0; i < nSamples; i++)
+    // 3) (Optional) sample from the product distribution:
+    /*
+    unsigned nSamples = 20;
+    arma::mat L = arma::chol(covProd, "lower");
+    for (unsigned i = 0; i < nSamples; i++)
     {
-        // 3.1) Draw a random vector z ~ N(0,I)
         arma::vec z = arma::randn<arma::vec>(muProd.n_elem);
-        // x = muProd + L*z
         arma::vec x = muProd + L * z;
-
-        // 3.2) Convert 'x' into an OMPL state
-        base::State *sampleState = si_->allocState();
-        auto *rv = sampleState->as<ompl::base::RealVectorStateSpace::StateType>();
-        for (unsigned int d = 0; d < muProd.n_elem; d++)
-            rv->values[d] = x[d];
-
-        // 3.3) Check collisions
-        if (si_->isValid(sampleState))
-        {
-            OMPL_INFORM("Sample %d: [%.3f, %.3f] is valid, adding to roadmap", i, x[0], x[1]);
-
-            // 3.4) If valid, add to the roadmap
-            addMilestone(sampleState);
-        }
-        else
-        {
-            OMPL_INFORM("Sample %d: [%.3f, %.3f] is invalid, discarding", i, x[0], x[1]);
-
-            // free invalid states
-            si_->freeState(sampleState);
-        }
+        // Now do collision check & addMilestone(...)
     }
-}
-
+    */
 }

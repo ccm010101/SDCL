@@ -47,25 +47,9 @@ double Environment2D::penetrationDist(pt point, pt &close_point)
     return 1.0;
 }
 
-//bool Environment2D::isStateValidLocal(cv::Point p)
-//{
-//    return isWhite(p);
-//}
 bool Environment2D::isStateValidLocal(cv::Point p)
 {
-    cv::Vec3b color = image.at<cv::Vec3b>(p);
-    int b = color[0], g = color[1], r = color[2];
-
-    // If black background is (0,0,0), treat it as blocked:
-    if (b < 10 && g < 10 && r < 10)
-        return false;
-
-    // If the shape’s interior is near white, treat it as free:
-    if (std::abs(b - 255) < 10 && std::abs(g - 255) < 10 && std::abs(r - 255) < 10)
-        return true;
-
-    // Otherwise, maybe block everything else
-    return false;
+    return isWhite(p);
 }
 
 int Environment2D::mapXPoint(double x)

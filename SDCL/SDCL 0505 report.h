@@ -356,11 +356,7 @@ public:
                               int param1,
                               int param2);
     void computePairwiseBD();
-    //void reportShortComponents(std::size_t maxSize);
-    std::vector<unsigned long> reportShortComponents(std::size_t maxSize);
-
-    //void productOfGaussians;
-    void sampleFromProductOfShortComps(std::size_t maxSize);
+    void reportShortComponents(std::size_t maxSize);
 
 private:
  // store the best model as an Armadillo gmm_diag:

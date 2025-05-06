@@ -30,7 +30,7 @@ Environment* get_scene_env(int scene)
                 pt lows  = {-4, -4};
                 pt highs = {4, 4};
         
-                return new Environment2D("../resource/exist2.png", lows, highs, start, goal);
+                return new Environment2D("../resource/exist21.png", lows, highs, start, goal);
             }
             // ...
             default:
