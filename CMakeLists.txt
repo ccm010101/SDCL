@@ -72,6 +72,10 @@ add_library(
 )
 target_link_libraries(scenes PRIVATE env)
 target_include_directories(scenes PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/scenes")
+#add_subdirectory(resource/twistycool_own)
+#add_subdirectory(resource/6dof_tabletop)
+#add_subdirectory(resource/7dof_exist_medium)
+
 
 # -------------------------------------- parser -----------------------------------------------
 add_library(
@@ -155,5 +159,4 @@ target_include_directories(RunSDCL
 )
 target_include_directories(SDCL PRIVATE /usr/local/include)
 #include_directories("/path/to/sciplot/include")
-# Make sure to define USE_SCIPLOT
 add_definitions(-DUSE_SCIPLOT)

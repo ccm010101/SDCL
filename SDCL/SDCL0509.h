@@ -145,13 +145,6 @@ public:
         using kind = boost::vertex_property_tag;
     };
 
-    struct ShortLongComponentsAndStates
-    {
-        std::vector<unsigned long> shortCompIDs;            // All component IDs with size <= maxSize
-        std::vector<unsigned long> longCompIDs;             // All component IDs with size > maxSize
-        std::vector<std::vector<double>> allRoadmapStates;  // The entire roadmap's states
-    };
-
     using Graph = boost::adjacency_list<
         boost::vecS, boost::vecS, boost::undirectedS,
         boost::property<
@@ -220,44 +213,6 @@ public:
     void clearQuery() override;
     void clear() override;
 
-
-    ShortLongComponentsAndStates reportShortAndLongComponents(std::size_t maxSize);
-
-
-
-    void buildPerComponentGMMsDiag(int minK, int maxK);
-
-    /**
-     * \brief Sample new states from the product of all short components' Gaussians and add them to the roadmap.
-     */
-    void sampleFromProductOfShortComps(std::size_t maxSize);
-
-    /**
-     * \brief Sample new states from the product of all long components' Gaussians and add them to the roadmap.
-     */
-    void sampleFromProductOfLongComps(std::size_t maxSize);
-
-    /**
-     * \brief Compute pairwise Bhattacharyya Distance among the GMMs in compGMMsDiag_.
-     */
-    void computePairwiseBD();
-
-    /**
-     * \brief Plot the roadmap states (e.g., 2D scatter) if dimension=2. Could be empty if not in 2D.
-     */
-    void plotRoadmapScatter(const std::string &filename);
-
-    /**
-     * \brief Plot each connected component’s single cluster GMM in 2D, coloring short vs. long comps differently, etc.
-     */
-    void plotPerComponentGMMClusters(const std::string &filename);
-
-
-    std::vector<std::vector<double>> collectRoadmapStates() const;
-
-
-
-
     template <template <typename T> class NN>
     void setNearestNeighbors()
     {
@@ -295,11 +250,6 @@ public:
     
     // --------Add the public prototype for sampleAndSaveCollisionPoints-----------------
     bool sampleAndSaveCollisionPoints(base::State* workState, bool use_Gaussian);
-
-
-
-
-
 
 protected:
     void freeMemory();
@@ -388,10 +338,39 @@ protected:
     std::vector<double> lower_bound_;
     unsigned int addedToTraining_{0};
 
+    // ----------MLPACK GMM ---------------------------------
 
+//#ifdef ENABLE_MLPACK
+//    #include <mlpack/methods/gmm/gmm.hpp>
+
+public:
+    std::vector<std::vector<double>> collectRoadmapStates() const;
+    std::vector<Vertex> findNarrowPassages(double clearanceThreshold, unsigned int minNeighborCount);
+    void plotRoadmapScatter(const std::string &filename); //scatterplot void plotRoadmapScatter(const std::string &filename) const;
+    //mlpack::gmm::GMM gmmModel_; // store best GMM if desired
+    arma::gmm_diag buildSingleCovDiagGMM(const arma::mat &dataset, int k);
+    void buildPerComponentGMMsDiag(int minK, int maxK);
+    //void trainGMMArmadilloBIC(const std::vector<std::vector<double>> &data,
+    //                        int minComponents, int maxComponents);
+    //void plotGMMClusters(const std::string &filename);
+    void plotPerComponentGMMClusters(const std::string &filename);
+    void trainGMMArmadilloBIC(const std::vector<std::vector<double>>& data,
+                              int param1,
+                              int param2);
+    void computePairwiseBD();
+    //void reportShortComponents(std::size_t maxSize);
+    std::vector<unsigned long> reportShortComponents(std::size_t maxSize);
+
+    //void productOfGaussians;
+    void sampleFromProductOfShortComps(std::size_t maxSize);
+    void sampleFromProductOfLongComps(std::size_t maxSize);
 private:
+ // store the best model as an Armadillo gmm_diag:
+    arma::gmm_diag armadilloDiagGMM_; 
 
-    std::unordered_map<unsigned long, arma::gmm_diag> compGMMsDiag_;
+
+
+    std::unordered_map<unsigned long, arma::gmm_diag> compGMMsDiag_;  // one diag GMM per component
 
 //#endif
 };

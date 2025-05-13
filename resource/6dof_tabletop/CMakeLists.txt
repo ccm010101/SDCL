@@ -13,9 +13,12 @@ pkg_search_module(AMINO_GL REQUIRED amino-gl)
 # Compile scene graph to C
 add_custom_command(
   OUTPUT 6doftabletop-scene.c 6doftabletop-scene.c.h
-  DEPENDS 6doftabletop.robray
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/6doftabletop.robray
   COMMAND aarxc "${CMAKE_SOURCE_DIR}/6doftabletop.robray" -o 6doftabletop-scene.c -n "6doftabletop"
   )
+
+
+
 
 # Compile plugin (shared library)
 add_library( scene MODULE 6doftabletop-scene.c )
@@ -26,3 +29,11 @@ target_link_libraries( scene
   ${AMINO_GL_LIBRARIES}
   ${AMINO_LIBRARIES}
   )
+
+
+
+# ***** Force the .so to appear in this subfolder, named libscene.so
+set_target_properties(scene PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+  OUTPUT_NAME "scene"
+)

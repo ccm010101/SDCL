@@ -225,44 +225,42 @@ int main(int argc, char** argv)
         {
             std::cout << "No solution found.\n";
         }
-    
-        // 1) Gather all states from the roadmap
-        auto data = planner->collectRoadmapStates(); // returns vector<vector<double>>
+        
 
-        // 2) Train GMM
-        int minK = 1; // the min number of clusters you want to test
-        int maxK = 20; // the max number of clusters
-        //planner->trainGMMArmadilloBIC(data, minK, maxK);
+        // 1) Gather all states and short/long components from the roadmap
+        auto info = planner->reportShortAndLongComponents(30); 
+    // This returns a ShortLongComponentsAndStates struct with:
+    //   info.shortCompIDs, info.longCompIDs, info.allRoadmapStates
 
-        //planner->buildPerComponentGMMs();
+    // the entire roadmap data for GMM or analysis
+        auto data = info.allRoadmapStates; // same type: vector<vector<double>>
+
+
+    // 3) Plot the roadmap “before”
         planner->plotRoadmapScatter("roadmapBefore.png");
-        planner->buildPerComponentGMMsDiag(1, 5);
+
+    // 4) Build single‐cluster diagonal GMM per connected component
+        planner->buildPerComponentGMMsDiag(1, 1);
+
+    // 5) Compute pairwise Bhattacharyya Distances
         planner->computePairwiseBD();
-        planner->sampleFromProductOfShortComps(99); 
-        // 10) Plot using the *actual* planner (which holds the real roadmap).
-        //     This assumes your SDCL class can safely plot even if no solution was found.
+
+    // 6) Sample from short and long components
+        planner->sampleFromProductOfShortComps(100);
+        planner->sampleFromProductOfLongComps(100);
+
+    // 7) Plot the roadmap “after”
         planner->plotRoadmapScatter("roadmapAfter.png");
-        //planner->plotGMMClusters("clusters.png");
+
+    // 8) Plot each per‐component single‐cluster GMM in 2D (color short vs. long)
         planner->plotPerComponentGMMClusters("clustersPerComp.png");
-        // Alternatively, if you want to overlay the roadmap onto
-        // your environment's image, you might do something like:
-        //
-        //   auto env2d = dynamic_cast<Environment2D*>(env);
-        //   if (env2d)
-        //       env2d->plotOnImage(planner->getRoadmap(), "roadmap_on_image.png");
-        //
-        // ...But that depends on how your environment2d.cpp is implemented.
-    
-        // 11) Clean up
-        delete env;  // Make sure no threads in the planner are still referencing env.
+
+    // 9) Clean up
+        delete env;  
         auto dt = std::chrono::steady_clock::now() - t0;
         std::cout << "Total run time: "
                   << std::chrono::duration<double>(dt).count() << " s\n";
-    
+
         return foundSolution ? 0 : 2;
+
 }
-
-
-
-
-    

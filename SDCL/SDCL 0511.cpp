@@ -12,7 +12,7 @@
 
 
 // ----objfunc, objfunc2, myconstraint, findClosetPoint removed ---
-// in this code I modify the number of samples 
+
 
 namespace ompl
 {
@@ -100,19 +100,6 @@ void SDCL::setup()
         setup_ = false;
     }
 }
-
-/// @brief Check if a vector x is within [lows[i], highs[i]] for all i
-bool inBounds(const arma::vec &x, const std::vector<double> &lows, const std::vector<double> &highs)
-{
-    // Assume x.n_elem == lows.size() == highs.size()
-    for (size_t d = 0; d < x.n_elem; d++)
-    {
-        if (x[d] < lows[d] || x[d] > highs[d])
-            return false;
-    }
-    return true;
-}
-
 
 SDCL::ShortLongComponentsAndStates 
 SDCL::reportShortAndLongComponents(std::size_t maxSize)
@@ -1035,15 +1022,11 @@ static void productOfGaussians(
 
 void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
 {
-    // scenes.cpp has the bound information 
-    std::vector<double> lows  = {-4, -4.0};
-    std::vector<double> highs = {4, 4.0};
-
-    // 1) Retrieve short comp IDs
+    // 1) Get the short (and long) comps. We'll only focus on short comps here.
     ShortLongComponentsAndStates info = reportShortAndLongComponents(maxSize);
     std::vector<unsigned long> shortComps = info.shortCompIDs;
 
-    // group vertices by component
+    // We’ll need the vertices grouped by component
     std::unordered_map<unsigned long, std::vector<Vertex>> compVerts;
     for (auto v : boost::make_iterator_range(boost::vertices(g_)))
     {
@@ -1052,32 +1035,35 @@ void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
     }
 
     auto numBefore = boost::num_vertices(g_);
-    unsigned int samplesPerCluster = 100; // e.g., how many to sample per cluster
+    unsigned int samplesPerCluster = 50; // how many to sample per Gaussian cluster
 
-    // 2) For each short component
+    // 2) For each short component, sample from its own (fallback or GMM) distribution
     for (unsigned long compID : shortComps)
     {
         const auto &verts = compVerts[compID];
         std::size_t compSize = verts.size();
         if (compSize == 0)
-            continue;
+            continue; 
 
-        // If < 5 states => fallback
         if (compSize < 5)
         {
+            // Fallback: single state => small diagonal covariance
             Vertex onlyV = verts[0];
             const base::State* st = stateProperty_[onlyV];
             auto *rv = st->as<base::RealVectorStateSpace::StateType>();
             unsigned int dim = si_->getStateDimension();
 
+            // Mean = that one state
             arma::vec mu(dim);
             for (unsigned int d = 0; d < dim; d++)
                 mu[d] = rv->values[d];
 
+            // Cov = identity * small eps
             double eps = 1.0;
             arma::mat covMat = eps * arma::eye<arma::mat>(dim, dim);
-            arma::mat L = arma::chol(covMat, "lower");
 
+            // Sample from this single fallback Gaussian
+            arma::mat L = arma::chol(covMat, "lower");
             for (unsigned int i = 0; i < samplesPerCluster; i++)
             {
                 arma::vec z = arma::randn<arma::vec>(dim);
@@ -1089,57 +1075,37 @@ void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
                 for (unsigned int d = 0; d < dim; ++d)
                     rvSamp->values[d] = x[d];
 
-                // BOUNDS CHECK
-                if (!inBounds(x, lows, highs))
-                {
-                    si_->freeState(sampleState);
-                    continue;
-                }
-
-                // collision check
+                // Check validity
                 if (si_->isValid(sampleState))
-                {
-                    // Debug print
-                    std::ostringstream oss;
-                    oss << "[";
-                    for (unsigned int dd = 0; dd < dim; dd++)
-                    {
-                        oss << x[dd];
-                        if (dd + 1 < dim) oss << ", ";
-                    }
-                    oss << "]";
-                    OMPL_INFORM("Sample %u: %s is valid (fallback), adding to roadmap", i, oss.str().c_str());
-
                     addMilestone(sampleState);
-                }
                 else
-                {
                     si_->freeState(sampleState);
-                }
             }
         }
         else
         {
-            // We have >=5 states => use the GMM from compGMMsDiag_
+            // We have >=5 states => we assume we built a GMM for this comp
             auto it = compGMMsDiag_.find(compID);
             if (it == compGMMsDiag_.end())
             {
-                OMPL_INFORM("No GMM found for short comp %lu, skipping", compID);
+                OMPL_INFORM("No GMM found for short comp %lu (size=%zu). Skipping.", compID, compSize);
                 continue;
             }
 
             const arma::gmm_diag &model = it->second;
-            arma::uword k = model.n_gaus();
+            arma::uword k = model.n_gaus(); 
             if (k == 0)
             {
-                OMPL_INFORM("Short comp %lu GMM is empty, skipping.", compID);
+                OMPL_INFORM("Short comp %lu has an empty GMM? Skipping.", compID);
                 continue;
             }
 
+            // For each cluster in this GMM:
+            // sample ~100 points from that cluster's diagonal covariance
             for (arma::uword c = 0; c < k; c++)
             {
-                arma::vec mu   = model.means.col(c);
-                arma::vec dVar = model.dcovs.col(c);
+                arma::vec mu   = model.means.col(c);  // cluster mean
+                arma::vec dVar = model.dcovs.col(c);  // diag variances
                 arma::mat cov  = arma::diagmat(dVar);
 
                 arma::mat L = arma::chol(cov, "lower");
@@ -1150,59 +1116,34 @@ void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
                     arma::vec z = arma::randn<arma::vec>(dim);
                     arma::vec x = mu + L * z;
 
+                    // Build OMPL state
                     base::State *sampleState = si_->allocState();
                     auto *rvSamp = sampleState->as<base::RealVectorStateSpace::StateType>();
                     for (unsigned int d = 0; d < dim; ++d)
                         rvSamp->values[d] = x[d];
 
-                    // BOUNDS CHECK
-                    if (!inBounds(x, lows, highs))
-                    {
-                        si_->freeState(sampleState);
-                        continue;
-                    }
-
-                    // collision check
+                    // Collision / bounds check
                     if (si_->isValid(sampleState))
-                    {
-                        // Debug print
-                        std::ostringstream oss;
-                        oss << "[";
-                        for (unsigned int dd = 0; dd < dim; dd++)
-                        {
-                            oss << x[dd];
-                            if (dd + 1 < dim) oss << ", ";
-                        }
-                        oss << "]";
-                        // For clarity, you might also log compID / cluster c:
-                        OMPL_INFORM("Sample %u: %s is valid (comp %lu, cluster %u), adding to roadmap", 
-                                    i, oss.str().c_str(), compID, c);
-
                         addMilestone(sampleState);
-                    }
                     else
-                    {
                         si_->freeState(sampleState);
-                    }
                 }
             }
         }
     }
 
+    // 3) Print how many new vertices we added
     auto numAfter = boost::num_vertices(g_);
-    OMPL_INFORM("Added %lu new vertices to the roadmap (per-short-comp sampling).",
+    OMPL_INFORM("Added %lu new vertices to the roadmap from sampling each short comp individually",
                 (numAfter - numBefore));
 }
 
 
 void SDCL::sampleFromProductOfLongComps(std::size_t maxSize)
 {
-    // scenes.cpp has the bound information 
-    std::vector<double> lows  = {-4, -4.0};
-    std::vector<double> highs = {4, 4.0};
-
     // 1) Get all short & long comp IDs from the new helper
     ShortLongComponentsAndStates info = reportShortAndLongComponents(maxSize);
+    // The "long" comps are directly in info.longCompIDs
     std::vector<unsigned long> longComps = info.longCompIDs;
 
     // 2) Collect the single Gaussians from each "long" comp
@@ -1238,47 +1179,21 @@ void SDCL::sampleFromProductOfLongComps(std::size_t maxSize)
     unsigned int nSamples = 1000;
     arma::mat L = arma::chol(covProd, "lower");
 
-    unsigned int dim = muProd.n_elem;
     for (unsigned int i = 0; i < nSamples; i++)
     {
-        arma::vec z = arma::randn<arma::vec>(dim);
+        arma::vec z = arma::randn<arma::vec>(muProd.n_elem);
         arma::vec x = muProd + L * z;
 
-        // Convert x to an OMPL state
         base::State *sampleState = si_->allocState();
-        auto *rv = sampleState->as<ompl::base::RealVectorStateSpace::StateType>();
-        for (unsigned int d = 0; d < dim; ++d)
+        auto *rv = sampleState->as<base::RealVectorStateSpace::StateType>();
+        for (unsigned int d = 0; d < muProd.n_elem; ++d)
             rv->values[d] = x[d];
-
-        // BOUNDS CHECK
-        if (!inBounds(x, lows, highs))
-        {
-            si_->freeState(sampleState);
-            continue;
-        }
 
         // Collision / bounds check
         if (si_->isValid(sampleState))
-        {
-            // Debug print
-            std::ostringstream oss;
-            oss << "[";
-            for (unsigned int dd = 0; dd < dim; dd++)
-            {
-                oss << x[dd];
-                if (dd + 1 < dim) oss << ", ";
-            }
-            oss << "]";
-
-            OMPL_INFORM("Sample %u: %s is valid from product-of-long-comps, adding to roadmap",
-                        i, oss.str().c_str());
-
             addMilestone(sampleState);
-        }
         else
-        {
             si_->freeState(sampleState);
-        }
     }
 
     auto numAfter = boost::num_vertices(g_);

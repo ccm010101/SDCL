@@ -49,6 +49,7 @@ Environment* get_scene_env(int scene)
             env = new HighDofEnvironment(start, goal, joints, "7dofexistmedium", "../resource/7dof_exist_medium/libscene.so", lows, highs, delta);
             break;
              }
+             
         case 3: {
             // 6dof universal arm
             start = {-1.6, 1.13, 2.32, 2.08, 3.32, 0.68};

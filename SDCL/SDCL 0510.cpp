@@ -12,7 +12,7 @@
 
 
 // ----objfunc, objfunc2, myconstraint, findClosetPoint removed ---
-// in this code I modify the number of samples 
+
 
 namespace ompl
 {
@@ -100,19 +100,6 @@ void SDCL::setup()
         setup_ = false;
     }
 }
-
-/// @brief Check if a vector x is within [lows[i], highs[i]] for all i
-bool inBounds(const arma::vec &x, const std::vector<double> &lows, const std::vector<double> &highs)
-{
-    // Assume x.n_elem == lows.size() == highs.size()
-    for (size_t d = 0; d < x.n_elem; d++)
-    {
-        if (x[d] < lows[d] || x[d] > highs[d])
-            return false;
-    }
-    return true;
-}
-
 
 SDCL::ShortLongComponentsAndStates 
 SDCL::reportShortAndLongComponents(std::size_t maxSize)
@@ -1035,15 +1022,16 @@ static void productOfGaussians(
 
 void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
 {
-    // scenes.cpp has the bound information 
-    std::vector<double> lows  = {-4, -4.0};
-    std::vector<double> highs = {4, 4.0};
-
-    // 1) Retrieve short comp IDs
-    ShortLongComponentsAndStates info = reportShortAndLongComponents(maxSize);
+    // 1) Identify the “short” connected components
+    //    Now we call the new function and extract the shortCompIDs:
+    auto info = reportShortAndLongComponents(maxSize);
     std::vector<unsigned long> shortComps = info.shortCompIDs;
 
-    // group vertices by component
+    // gather all Gaussians (clusters) from these short components
+    std::vector<arma::vec> means;
+    std::vector<arma::mat> covs;
+
+    // group the vertices by component
     std::unordered_map<unsigned long, std::vector<Vertex>> compVerts;
     for (auto v : boost::make_iterator_range(boost::vertices(g_)))
     {
@@ -1051,158 +1039,126 @@ void SDCL::sampleFromProductOfShortComps(std::size_t maxSize)
         compVerts[cID].push_back(v);
     }
 
-    auto numBefore = boost::num_vertices(g_);
-    unsigned int samplesPerCluster = 100; // e.g., how many to sample per cluster
-
-    // 2) For each short component
     for (unsigned long compID : shortComps)
     {
-        const auto &verts = compVerts[compID];
+        auto &verts = compVerts[compID];
         std::size_t compSize = verts.size();
-        if (compSize == 0)
-            continue;
 
-        // If < 5 states => fallback
-        if (compSize < 5)
+        // Fallback if exactly one state
+        if (compSize == 1)
         {
-            Vertex onlyV = verts[0];
-            const base::State* st = stateProperty_[onlyV];
-            auto *rv = st->as<base::RealVectorStateSpace::StateType>();
-            unsigned int dim = si_->getStateDimension();
+            Vertex theOnlyV = verts[0];
+            const base::State* singleSt = stateProperty_[theOnlyV];
+            auto *rv = singleSt->as<ompl::base::RealVectorStateSpace::StateType>();
+            unsigned int d = si_->getStateDimension();
 
-            arma::vec mu(dim);
-            for (unsigned int d = 0; d < dim; d++)
-                mu[d] = rv->values[d];
+            arma::vec mu(d);
+            for (unsigned int i = 0; i < d; i++)
+                mu[i] = rv->values[i];
 
+            // small diagonal
             double eps = 1.0;
-            arma::mat covMat = eps * arma::eye<arma::mat>(dim, dim);
-            arma::mat L = arma::chol(covMat, "lower");
+            arma::vec diagVar(d, arma::fill::ones);
+            diagVar *= eps;
+            arma::mat covMat = arma::diagmat(diagVar);
 
-            for (unsigned int i = 0; i < samplesPerCluster; i++)
+            means.push_back(mu);
+            covs.push_back(covMat);
+            continue;
+        }
+
+        // If >= 2 states, see if we built a GMM for it
+        auto it = compGMMsDiag_.find(compID);
+        if (it == compGMMsDiag_.end())
+        {
+            OMPL_INFORM("No GMM found for component %lu (size=%zu), skipping component.", compID, compSize);
+            continue;
+        }
+
+        const arma::gmm_diag &model = it->second;
+        arma::uword k = model.n_gaus();
+        if (k == 0)
+        {
+            OMPL_INFORM("GMM for comp %lu has zero clusters, skipping.", compID);
+            continue;
+        }
+        // Each cluster => diagonal covariance
+        for (arma::uword c = 0; c < k; c++)
+        {
+            arma::vec m   = model.means.col(c);
+            arma::vec dCv = model.dcovs.col(c);
+            arma::mat covMat = arma::diagmat(dCv);
+
+            means.push_back(m);
+            covs.push_back(covMat);
+        }
+    }
+
+    if (means.empty())
+    {
+        OMPL_INFORM("No clusters or fallback single-states from short comps. Nothing to do.");
+        return;
+    }
+
+    // 2) Multiply them into a single “product” Gaussian
+    arma::vec muProd;
+    arma::mat covProd;
+    productOfGaussians(means, covs, muProd, covProd);
+
+    OMPL_INFORM("Product of Gaussians across short comps => muProd:");
+    muProd.t().print(std::cout, "muProd:");
+    OMPL_INFORM("covProd = ");
+    covProd.print(std::cout);
+
+    // 3) Sample from that product distribution
+    auto numBefore = boost::num_vertices(g_);
+    unsigned int nSamples = 2000;
+    arma::mat L = arma::chol(covProd, "lower"); // Cholesky factor
+
+    for (unsigned int i = 0; i < nSamples; i++)
+    {
+        arma::vec z = arma::randn<arma::vec>(muProd.n_elem);
+        arma::vec x = muProd + L*z;  // sample in d dimensions
+
+        // fill an OMPL RealVectorState
+        base::State *sampleState = si_->allocState();
+        auto *rv = sampleState->as<ompl::base::RealVectorStateSpace::StateType>();
+        for (unsigned int d = 0; d < muProd.n_elem; ++d)
+            rv->values[d] = x[d];
+
+        // collision / bounds check
+        if (si_->isValid(sampleState))
+        {
+            // Debug printing for all d:
+            std::ostringstream oss;
+            oss << "[";
+            for (unsigned int dd = 0; dd < muProd.n_elem; dd++)
             {
-                arma::vec z = arma::randn<arma::vec>(dim);
-                arma::vec x = mu + L * z;
-
-                // Convert x -> OMPL state
-                base::State *sampleState = si_->allocState();
-                auto *rvSamp = sampleState->as<base::RealVectorStateSpace::StateType>();
-                for (unsigned int d = 0; d < dim; ++d)
-                    rvSamp->values[d] = x[d];
-
-                // BOUNDS CHECK
-                if (!inBounds(x, lows, highs))
-                {
-                    si_->freeState(sampleState);
-                    continue;
-                }
-
-                // collision check
-                if (si_->isValid(sampleState))
-                {
-                    // Debug print
-                    std::ostringstream oss;
-                    oss << "[";
-                    for (unsigned int dd = 0; dd < dim; dd++)
-                    {
-                        oss << x[dd];
-                        if (dd + 1 < dim) oss << ", ";
-                    }
-                    oss << "]";
-                    OMPL_INFORM("Sample %u: %s is valid (fallback), adding to roadmap", i, oss.str().c_str());
-
-                    addMilestone(sampleState);
-                }
-                else
-                {
-                    si_->freeState(sampleState);
-                }
+                oss << x[dd];
+                if (dd + 1 < muProd.n_elem) oss << ", ";
             }
+            oss << "]";
+
+            OMPL_INFORM("Sample %u: %s is valid, adding to roadmap", i, oss.str().c_str());
+            addMilestone(sampleState);
         }
         else
         {
-            // We have >=5 states => use the GMM from compGMMsDiag_
-            auto it = compGMMsDiag_.find(compID);
-            if (it == compGMMsDiag_.end())
-            {
-                OMPL_INFORM("No GMM found for short comp %lu, skipping", compID);
-                continue;
-            }
-
-            const arma::gmm_diag &model = it->second;
-            arma::uword k = model.n_gaus();
-            if (k == 0)
-            {
-                OMPL_INFORM("Short comp %lu GMM is empty, skipping.", compID);
-                continue;
-            }
-
-            for (arma::uword c = 0; c < k; c++)
-            {
-                arma::vec mu   = model.means.col(c);
-                arma::vec dVar = model.dcovs.col(c);
-                arma::mat cov  = arma::diagmat(dVar);
-
-                arma::mat L = arma::chol(cov, "lower");
-                unsigned int dim = mu.n_elem;
-
-                for (unsigned int i = 0; i < samplesPerCluster; i++)
-                {
-                    arma::vec z = arma::randn<arma::vec>(dim);
-                    arma::vec x = mu + L * z;
-
-                    base::State *sampleState = si_->allocState();
-                    auto *rvSamp = sampleState->as<base::RealVectorStateSpace::StateType>();
-                    for (unsigned int d = 0; d < dim; ++d)
-                        rvSamp->values[d] = x[d];
-
-                    // BOUNDS CHECK
-                    if (!inBounds(x, lows, highs))
-                    {
-                        si_->freeState(sampleState);
-                        continue;
-                    }
-
-                    // collision check
-                    if (si_->isValid(sampleState))
-                    {
-                        // Debug print
-                        std::ostringstream oss;
-                        oss << "[";
-                        for (unsigned int dd = 0; dd < dim; dd++)
-                        {
-                            oss << x[dd];
-                            if (dd + 1 < dim) oss << ", ";
-                        }
-                        oss << "]";
-                        // For clarity, you might also log compID / cluster c:
-                        OMPL_INFORM("Sample %u: %s is valid (comp %lu, cluster %u), adding to roadmap", 
-                                    i, oss.str().c_str(), compID, c);
-
-                        addMilestone(sampleState);
-                    }
-                    else
-                    {
-                        si_->freeState(sampleState);
-                    }
-                }
-            }
+            // Freed if invalid
+            si_->freeState(sampleState);
         }
     }
 
     auto numAfter = boost::num_vertices(g_);
-    OMPL_INFORM("Added %lu new vertices to the roadmap (per-short-comp sampling).",
+    OMPL_INFORM("Added %lu new vertices to the roadmap from product-of-short-comps",
                 (numAfter - numBefore));
 }
 
-
 void SDCL::sampleFromProductOfLongComps(std::size_t maxSize)
 {
-    // scenes.cpp has the bound information 
-    std::vector<double> lows  = {-4, -4.0};
-    std::vector<double> highs = {4, 4.0};
-
     // 1) Get all short & long comp IDs from the new helper
     ShortLongComponentsAndStates info = reportShortAndLongComponents(maxSize);
+    // The "long" comps are directly in info.longCompIDs
     std::vector<unsigned long> longComps = info.longCompIDs;
 
     // 2) Collect the single Gaussians from each "long" comp
@@ -1238,47 +1194,21 @@ void SDCL::sampleFromProductOfLongComps(std::size_t maxSize)
     unsigned int nSamples = 1000;
     arma::mat L = arma::chol(covProd, "lower");
 
-    unsigned int dim = muProd.n_elem;
     for (unsigned int i = 0; i < nSamples; i++)
     {
-        arma::vec z = arma::randn<arma::vec>(dim);
+        arma::vec z = arma::randn<arma::vec>(muProd.n_elem);
         arma::vec x = muProd + L * z;
 
-        // Convert x to an OMPL state
         base::State *sampleState = si_->allocState();
-        auto *rv = sampleState->as<ompl::base::RealVectorStateSpace::StateType>();
-        for (unsigned int d = 0; d < dim; ++d)
+        auto *rv = sampleState->as<base::RealVectorStateSpace::StateType>();
+        for (unsigned int d = 0; d < muProd.n_elem; ++d)
             rv->values[d] = x[d];
-
-        // BOUNDS CHECK
-        if (!inBounds(x, lows, highs))
-        {
-            si_->freeState(sampleState);
-            continue;
-        }
 
         // Collision / bounds check
         if (si_->isValid(sampleState))
-        {
-            // Debug print
-            std::ostringstream oss;
-            oss << "[";
-            for (unsigned int dd = 0; dd < dim; dd++)
-            {
-                oss << x[dd];
-                if (dd + 1 < dim) oss << ", ";
-            }
-            oss << "]";
-
-            OMPL_INFORM("Sample %u: %s is valid from product-of-long-comps, adding to roadmap",
-                        i, oss.str().c_str());
-
             addMilestone(sampleState);
-        }
         else
-        {
             si_->freeState(sampleState);
-        }
     }
 
     auto numAfter = boost::num_vertices(g_);
